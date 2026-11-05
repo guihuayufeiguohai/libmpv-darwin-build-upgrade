@@ -194,6 +194,28 @@ pkgs.stdenvNoCC.mkDerivation {
       uchardet
       libbluray
     ];
+  # swiftc drives the clang importer over osdep/mac/app_bridge_objc.h, which
+  # pulls in <Cocoa/Cocoa.h>. That forces clang to materialise module caches
+  # (*.pcm) under $HOME/.cache/clang/ModuleCache. Nix builds run with
+  # HOME=/homeless-shelter, which does not exist and cannot be created, so the
+  # build dies with:
+  #
+  #   error: unable to open output file
+  #     '/homeless-shelter/.cache/clang/ModuleCache/.../Cocoa-*.pcm':
+  #     'Operation not permitted'
+  #   error: failed to emit precompiled header ... for bridging header
+  #     .../osdep/mac/app_bridge_objc.h
+  #   error: could not build module 'Cocoa'
+  #
+  # Point clang at a cache inside the writable build directory instead.
+  # HOME is deliberately left untouched: TOOLS/macos-swift-lib-directory.py
+  # falls back to `xcode-select -p` and other build tools may read it.
+  preConfigure = ''
+    export XDG_CACHE_HOME="$NIX_BUILD_TOP/.cache"
+    mkdir -p "$XDG_CACHE_HOME"
+    export CLANG_MODULE_CACHE_PATH="$XDG_CACHE_HOME/clang/ModuleCache"
+    mkdir -p "$CLANG_MODULE_CACHE_PATH"
+  '';
   configurePhase = ''
     DISABLE_ALL_OPTIONS=(
       `# booleans`
