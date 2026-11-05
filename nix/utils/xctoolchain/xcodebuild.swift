@@ -139,13 +139,34 @@ func getPlatformAndVariant(usingVtoolFor binaryPath: String, architectures: [Str
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     let output = String(data: data, encoding: .utf8) ?? ""
 
-    if output.contains("IOSSIMULATOR")
-      || (output.contains("LC_VERSION_MIN_IPHONEOS") && architecture == "x86_64")
-    {
+    // Xcode 10+ emits LC_BUILD_VERSION with an explicit `platform` field
+    // instead of the legacy LC_VERSION_MIN_* load commands. Both forms have to
+    // be understood: without the LC_BUILD_VERSION branch, a device arm64
+    // binary built by a current toolchain matches nothing and falls through to
+    // ("unknown", nil), producing an xcframework slice literally named
+    // "unknown-arm64" instead of "ios-arm64".
+    //
+    // IOSSIMULATOR / MACCATALYST are matched before the plain IOS platform
+    // because they contain "IOS" as a substring.
+    let buildInfo = output.uppercased()
+
+    if buildInfo.contains("IOSSIMULATOR") {
       return ("ios", "simulator")
-    } else if output.contains("LC_VERSION_MIN_IPHONEOS") && architecture == "arm64" {
+    } else if buildInfo.contains("MACCATALYST") {
+      return ("ios", "maccatalyst")
+    } else if buildInfo.contains("PLATFORM IOS") {
       return ("ios", nil)
-    } else if output.contains("LC_VERSION_MIN_MACOSX") || output.contains("MACOS") {
+    } else if buildInfo.contains("PLATFORM MACOS") {
+      return ("macos", nil)
+    }
+
+    // Legacy load commands, still emitted by older toolchains.
+    if buildInfo.contains("LC_VERSION_MIN_IPHONEOS") {
+      if architecture == "x86_64" {
+        return ("ios", "simulator")
+      }
+      return ("ios", nil)
+    } else if buildInfo.contains("LC_VERSION_MIN_MACOSX") || buildInfo.contains("MACOS") {
       return ("macos", nil)
     }
   }
