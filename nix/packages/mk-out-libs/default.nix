@@ -37,7 +37,15 @@ if arch != archs.universal then
     mpv = callPackage ../mk-pkg-mpv/default.nix { };
     ffmpeg = callPackage ../mk-pkg-ffmpeg/default.nix { };
     mbedtls = callPackage ../mk-pkg-mbedtls/default.nix { };
-    fftoolsFfi = callPackage ../mk-pkg-fftools-ffi/default.nix { };
+    # fftools-ffi is NOT part of the encodersgpl flavor any more: upstream
+    # (moffatman/fftools-ffi, commit 9b0d4da0 == its current HEAD) vendors a
+    # fork of FFmpeg's fftools from the FFmpeg 6 era and does not compile
+    # against FFmpeg 7.0.2 (it fails with deprecated/removed libav* API).
+    # The melodink reference build, which also uses FFmpeg 7.0.2, dropped it
+    # for the same reason.
+    # The package definition (../mk-pkg-fftools-ffi) and its packages.lock.nix
+    # entry are kept so it can be re-enabled once ported to FFmpeg 7:
+    #   fftoolsFfi = callPackage ../mk-pkg-fftools-ffi/default.nix { };
     libvorbis = callPackage ../mk-pkg-libvorbis/default.nix { };
     libogg = callPackage ../mk-pkg-libogg/default.nix { };
     dav1d = callPackage ../mk-pkg-dav1d/default.nix { };
@@ -58,7 +66,6 @@ if arch != archs.universal then
         mbedtls
       ]
       ++ pkgs.lib.optionals (flavor == flavors.encodersgpl) [
-        fftoolsFfi
         libvorbis
         libogg
       ]
