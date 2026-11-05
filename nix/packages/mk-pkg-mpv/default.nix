@@ -195,10 +195,10 @@ pkgs.stdenvNoCC.mkDerivation {
       libbluray
     ];
   # swiftc drives the clang importer over osdep/mac/app_bridge_objc.h, which
-  # pulls in <Cocoa/Cocoa.h>. That forces clang to materialise module caches
-  # (*.pcm) under $HOME/.cache/clang/ModuleCache. Nix builds run with
-  # HOME=/homeless-shelter, which does not exist and cannot be created, so the
-  # build dies with:
+  # pulls in <Cocoa/Cocoa.h>. That makes clang materialise module caches
+  # (*.pcm). Its default location is $HOME/.cache/clang/ModuleCache, and Nix
+  # builds run with HOME=/homeless-shelter, which does not exist and cannot be
+  # created, so swiftc aborts with:
   #
   #   error: unable to open output file
   #     '/homeless-shelter/.cache/clang/ModuleCache/.../Cocoa-*.pcm':
@@ -207,16 +207,23 @@ pkgs.stdenvNoCC.mkDerivation {
   #     .../osdep/mac/app_bridge_objc.h
   #   error: could not build module 'Cocoa'
   #
-  # Point clang at a cache inside the writable build directory instead.
-  # HOME is deliberately left untouched: TOOLS/macos-swift-lib-directory.py
-  # falls back to `xcode-select -p` and other build tools may read it.
-  preConfigure = ''
-    export XDG_CACHE_HOME="$NIX_BUILD_TOP/.cache"
-    mkdir -p "$XDG_CACHE_HOME"
-    export CLANG_MODULE_CACHE_PATH="$XDG_CACHE_HOME/clang/ModuleCache"
-    mkdir -p "$CLANG_MODULE_CACHE_PATH"
-  '';
+  # meson drives swiftc through a custom_target, so there is no place to inject
+  # -module-cache-path; environment variables are the only lever. HOME itself is
+  # redirected as well, because the failing path is derived from $HOME and
+  # clang's own module-cache vars are not necessarily honoured on the swiftc ->
+  # clang-importer path. These exports must live inside configurePhase: that
+  # attribute replaces stdenv's default implementation, so a separate
+  # `preConfigure = ...` attribute would never run (confirmed from CI: the log
+  # jumps straight from updateAutotoolsGnuConfigScriptsPhase to configurePhase).
+  # stdenv runs all phases as functions of one bash process, so the exports are
+  # still visible in buildPhase.
   configurePhase = ''
+    export HOME="$NIX_BUILD_TOP/home"
+    mkdir -p "$HOME"
+    export XDG_CACHE_HOME="$NIX_BUILD_TOP/.cache"
+    export CLANG_MODULE_CACHE_PATH="$NIX_BUILD_TOP/.cache/clang/ModuleCache"
+    mkdir -p "$CLANG_MODULE_CACHE_PATH"
+
     DISABLE_ALL_OPTIONS=(
       `# booleans`
       -Dgpl=false `# GPL (version 2 or later) build`
