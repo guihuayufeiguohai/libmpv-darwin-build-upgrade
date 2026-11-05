@@ -1,0 +1,152 @@
+--- mpv-0.36.0-original/stream/stream_bluray.c	2026-07-15 18:34:51
++++ mpv-0.36.0-modified/stream/stream_bluray.c	2026-07-20 12:42:47
+@@ -29,6 +29,7 @@
+ #include <string.h>
+ #include <strings.h>
+ #include <assert.h>
++#include <stdio.h>
+ 
+ #include <libbluray/bluray.h>
+ #include <libbluray/meta_data.h>
+\ No newline at end of file
+@@ -50,6 +51,7 @@
+ #include "sub/img_convert.h"
+ #include "video/mp_image.h"
+ 
++
+ #define BLURAY_SECTOR_SIZE     6144
+ 
+ #define BLURAY_DEFAULT_ANGLE      0
+\ No newline at end of file
+@@ -86,13 +88,61 @@
+     char *cfg_device;
+ 
+     bool use_nav;
++    struct stream *http_stream; 
+ };
++
++/* ---------- HTTP Blu-ray stream callback & opener ---------- */
++static int http_read_cb(void *handle, void *buf, int lba, int num_blocks)
++{
++    struct stream *s = handle;
++    int64_t pos = (int64_t)lba * 2048;
++    if (stream_seek(s, pos) < 0)
++        return -1;
++
++    int size = num_blocks * 2048;
++    int read_bytes = stream_read(s, buf, size);
++    return (read_bytes == size) ? num_blocks : -1;
++}
++
++static int open_bd_http(stream_t *stream, const char *url)
++{
++    struct bluray_priv_s *b = stream->priv;
++    struct mpv_global *global = stream->global;
++
++    struct stream *http_stream = stream_create(url, STREAM_READ, NULL, global);
++    if (!http_stream)
++        return STREAM_UNSUPPORTED;
++
++    // 用 bd_init() 创建未打开的 BLURAY 句柄
++    BLURAY *bd = bd_init();
++    if (!bd) {
++        free_stream(http_stream);
++        return STREAM_UNSUPPORTED;
++    }
++
++    // 绑定自定义读取回调，成功后 bd 即可正常使用
++    if (bd_open_stream(bd, http_stream, http_read_cb) <= 0) {
++        bd_close(bd);
++        free_stream(http_stream);
++        return STREAM_UNSUPPORTED;
++    }
++
++    b->bd = bd;
++    b->http_stream = http_stream;   // 保存以便后续释放
+ 
++    MP_VERBOSE(stream, "Opened Blu-ray over HTTP: %s\n", url);
++    return STREAM_OK;
++}
++/* ---------- end of HTTP additions ---------- */
++
+ static void destruct(struct bluray_priv_s *priv)
+ {
+     if (priv->title_info)
+         bd_free_title_info(priv->title_info);
+-    bd_close(priv->bd);
++    if (priv->bd)
++        bd_close(priv->bd);
++    if (priv->http_stream)
++        free_stream(priv->http_stream);
+ }
+ 
+ inline static int play_playlist(struct bluray_priv_s *priv, int playlist)
+\ No newline at end of file
+@@ -389,13 +439,23 @@
+     if (!mp_msg_test(s->log, MSGL_DEBUG))
+         bd_set_debug_mask(0);
+ 
+-    /* open device */
+-    BLURAY *bd = bd_open(device, NULL);
+-    if (!bd) {
+-        MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
+-        return STREAM_UNSUPPORTED;
++    /* ---- Detect HTTP URL and use streaming path ---- */
++    bool is_http = strncmp(device, "http://", 7) == 0 ||
++                   strncmp(device, "https://", 8) == 0;
++    if (is_http) {
++        int ret = open_bd_http(s, device);
++        if (ret != STREAM_OK)
++            return ret;
++        // b->bd is now set by open_bd_http
++    } else {
++        /* open device */
++        BLURAY *bd = bd_open(device, NULL);
++        if (!bd) {
++            MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
++            return STREAM_UNSUPPORTED;
++        }
++        b->bd = bd;
+     }
+-    b->bd = bd;
+ 
+     if (!check_disc_info(s)) {
+         destruct(b);
+\ No newline at end of file
+@@ -408,7 +468,7 @@
+         return STREAM_ERROR;
+     } else {
+         /* check for available titles on disc */
+-        b->num_titles = bd_get_titles(bd, TITLES_RELEVANT, 0);
++        b->num_titles = bd_get_titles(b->bd, TITLES_RELEVANT, 0);
+         if (!b->num_titles) {
+             MP_ERR(s, "Can't find any Blu-ray-compatible title here.\n");
+             destruct(b);
+\ No newline at end of file
+@@ -420,7 +480,7 @@
+         /* parse titles information */
+         uint64_t max_duration = 0;
+         for (int i = 0; i < b->num_titles; i++) {
+-            BLURAY_TITLE_INFO *ti = bd_get_title_info(bd, i, 0);
++            BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, i, 0);
+             if (!ti)
+                 continue;
+ 
+\ No newline at end of file
+@@ -444,7 +504,7 @@
+     b->current_title = -1;
+ 
+     // initialize libbluray event queue
+-    bd_get_event(bd, NULL);
++    bd_get_event(b->bd, NULL);
+ 
+     select_initial_title(s, title_guess);
+ 
+\ No newline at end of file
+@@ -608,4 +668,4 @@
+     .open = bdmv_dir_stream_open,
+     .protocols = (const char*const[]){ "file", "", NULL },
+     .stream_origin = STREAM_ORIGIN_UNSAFE,
+-};
++};
+\ No newline at end of file

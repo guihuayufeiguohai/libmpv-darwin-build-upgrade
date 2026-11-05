@@ -1,0 +1,93 @@
+--- mpv-0.36.0-original/audio/out/ao_audiounit.m	2026-07-15 18:34:51
++++ mpv-0.36.0-modified/audio/out/ao_audiounit.m	2026-07-16 14:34:17
+@@ -30,6 +30,71 @@
+ #import <AVFoundation/AVFoundation.h>
+ #import <mach/mach_time.h>
+ 
++// ==== 音频 TAP 回调 (自定义修改) ====
++// 外部可以通过此函数设置回调，获取送往喇叭的音频数据。
++// 回调运行在 CoreAudio 渲染线程，必须无阻塞、无锁，不能分配内存。
++static void (*audio_tap_cb)(void *data, size_t size, void *ctx) = NULL;
++static void *audio_tap_ctx = NULL;
++
++__attribute__((visibility("default")))
++void mpv_ao_coreaudio_set_tap_callback(
++    void (*callback)(void *data, size_t size, void *ctx),
++    void *ctx)
++{
++    audio_tap_cb = callback;
++    audio_tap_ctx = ctx;
++}
++// ==== 音频 TAP 回调结束 ====
++
++// ==== FFmpeg 重采样转换 (复用 mpv 内置 FFmpeg) ====
++#include <libswresample/swresample.h>
++#include <libavutil/channel_layout.h>
++#include <libavutil/opt.h>
++
++static SwrContext *tap_swr_ctx = NULL;
++
++// 初始化转换器：输入格式动态，输出固定 16kHz/s16/mono
++__attribute__((visibility("default")))
++int mpv_ao_audiounit_init_swr(int in_rate, int in_channels, int in_format) {
++    enum AVSampleFormat in_fmt;
++    switch (in_format) {
++        case AF_FORMAT_FLOAT:   in_fmt = AV_SAMPLE_FMT_FLT; break;
++        case AF_FORMAT_S16:     in_fmt = AV_SAMPLE_FMT_S16; break;
++        case AF_FORMAT_S32:     in_fmt = AV_SAMPLE_FMT_S32; break;
++        default: return -1;
++    }
++
++    swr_free(&tap_swr_ctx);
++    tap_swr_ctx = swr_alloc_set_opts(NULL,
++        AV_CH_LAYOUT_MONO, AV_SAMPLE_FMT_S16, 16000,       // 输出
++        in_channels == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO,
++        in_fmt, in_rate,
++        0, NULL);
++    if (!tap_swr_ctx || swr_init(tap_swr_ctx) < 0) {
++        swr_free(&tap_swr_ctx);
++        return -1;
++    }
++    return 0;
++}
++
++// 立体声 float 非交错 → 16kHz s16 单声道交错
++__attribute__((visibility("default")))
++int mpv_ao_audiounit_convert_stereo_float_to_mono_s16(
++    float *left, float *right, int in_samples, int16_t *out_data, int out_capacity)
++{
++    if (!tap_swr_ctx) return -1;
++    const uint8_t *in[2] = { (uint8_t *)left, (uint8_t *)right };
++    uint8_t *out[1] = { (uint8_t *)out_data };
++    int out_samples = swr_convert(tap_swr_ctx, out, out_capacity, in, in_samples);
++    return out_samples;
++}
++
++__attribute__((visibility("default")))
++void mpv_ao_audiounit_free_swr(void) {
++    swr_free(&tap_swr_ctx);
++}
++// ==== FFmpeg 结束 ====
++
+ struct priv {
+     AudioUnit audio_unit;
+     double device_latency;
+@@ -98,6 +163,18 @@
+     end += p->device_latency * 1e6;
+     end += ca_get_latency(ts) + ca_frames_to_us(ao, frames);
+     ao_read_data(ao, planes, frames, end);
++    
++      // ==== 音频 TAP: 将已填充的 PCM 数据拷贝给外部回调 ====
++    if (audio_tap_cb) {
++        for (UInt32 i = 0; i < buffer_list->mNumberBuffers; i++) {
++            AudioBuffer buf = buffer_list->mBuffers[i];
++            if (buf.mDataByteSize > 0) {
++                audio_tap_cb(buf.mData, buf.mDataByteSize, audio_tap_ctx);
++            }
++        }
++    }
++    // ==== TAP 结束 ====
++
+     return noErr;
+ }
+ 

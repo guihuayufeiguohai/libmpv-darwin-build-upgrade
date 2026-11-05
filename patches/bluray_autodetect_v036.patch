@@ -1,0 +1,271 @@
+--- a/stream/stream_bluray.c
++++ b/stream/stream_bluray.c
+@@ -91,17 +91,30 @@
+     struct stream *http_stream; 
+ };
+ 
++// Declared in stream/stream_lavf.c. Used below to force the http/https
++// stream implementation instead of autoprobing.
++extern const stream_info_t stream_info_ffmpeg;
++
+ /* ---------- HTTP Blu-ray stream callback & opener ---------- */
+ static int http_read_cb(void *handle, void *buf, int lba, int num_blocks)
+ {
+     struct stream *s = handle;
+     int64_t pos = (int64_t)lba * 2048;
+-    if (stream_seek(s, pos) < 0)
++
++    /* stream_seek() returns bool (true/false), never a negative value, so the
++     * original `if (stream_seek(s, pos) < 0)` was always false: a failed seek
++     * was silently ignored and stream_read() then returned bytes from the OLD
++     * position. That is what produced corrupt mpegts packets (identical dts
++     * repeated across seeks) and bogus "PTS discontinuity" jumps, cascading
++     * into h264 corruption, VideoToolbox -12909 and "Error decoding audio." */
++    if (!stream_seek(s, pos))
+         return -1;
+ 
+     int size = num_blocks * 2048;
+     int read_bytes = stream_read(s, buf, size);
+-    return (read_bytes == size) ? num_blocks : -1;
++    if (read_bytes != size)
++        return -1;
++    return num_blocks;
+ }
+ 
+ static int open_bd_http(stream_t *stream, const char *url)
+@@ -109,7 +122,20 @@
+     struct bluray_priv_s *b = stream->priv;
+     struct mpv_global *global = stream->global;
+ 
+-    struct stream *http_stream = stream_create(url, STREAM_READ, NULL, global);
++    // Force the ffmpeg (http/https) stream implementation and DIRECT origin:
++    //  * .sinfo avoids autoprobing. Autoprobe would re-enter
++    //    bdmv_http_stream_open() (registered in stream_list ahead of
++    //    stream_info_ffmpeg) -> infinite recursion / stack overflow.
++    //  * STREAM_READ alone leaves origin at 0, and check_origin(0, NET) == 0,
++    //    so the http stream would be rejected as STREAM_UNSAFE -> NULL.
++    struct stream_open_args args = {
++        .global = global,
++        .flags  = STREAM_READ | STREAM_ORIGIN_DIRECT,
++        .url    = url,
++        .sinfo  = &stream_info_ffmpeg,
++    };
++    struct stream *http_stream = NULL;
++    stream_create_with_args(&args, &http_stream);
+     if (!http_stream)
+         return STREAM_UNSUPPORTED;
+ 
+@@ -508,6 +534,17 @@
+ 
+     select_initial_title(s, title_guess);
+ 
++    // Some discs report a non-zero position immediately after
++    // bd_select_title(). demux_disc.c reset_pts() feeds bd_tell_time() into
++    // p->base_time and then rebase every packet with
++    //     delta = -p->base_dts + p->base_time
++    // so a non-zero base_time shifts the whole timeline: the first packet
++    // ends up at 12.716444s and playback starts ~12s in instead of at 0
++    // (log: "[disc] reset to time: 12.716444").
++    // Rewind to the very beginning of the title so base_time becomes 0.
++    if (((struct bluray_priv_s *)s->priv)->bd)
++        bd_seek_time(((struct bluray_priv_s *)s->priv)->bd, 0);
++
+     s->fill_buffer = bluray_stream_fill_buffer;
+     s->close       = bluray_stream_close;
+     s->control     = bluray_stream_control;
+@@ -634,6 +671,19 @@
+     if (!path)
+         goto unsupported;
+ 
++    // Blu-ray ISO image. Backported from mpv master: v0.36.0 only probes BDMV
++    // directories, so a plain .iso path never reaches libbluray.
++    if (bstr_case_endswith(bstr0(path), bstr0(".iso")) ||
++        bstr_case_endswith(bstr0(path), bstr0(".img")))
++    {
++        priv->cfg_device = talloc_strdup(priv, path);
++        int r = bluray_stream_open_internal(stream);
++        if (r != STREAM_OK)
++            goto unsupported;   // not a Blu-ray image: let file/ffmpeg handle it
++        MP_INFO(stream, "Blu-ray ISO image detected. Redirecting to bluray://\n");
++        return r;
++    }
++
+     // We allow the path to point to a directory containing BDMV/, a
+     // directory containing MovieObject.bdmv, or that file itself.
+     if (!check_bdmv(path)) {
+@@ -667,5 +717,64 @@
+     .name = "bdmv/bluray",
+     .open = bdmv_dir_stream_open,
+     .protocols = (const char*const[]){ "file", "", NULL },
+-    .stream_origin = STREAM_ORIGIN_UNSAFE,
+-};
+\ No newline at end of file
++    // STREAM_ORIGIN_FS (was UNSAFE): this handler only ever touches local paths
++    // ("file" / ""), so it is no less safe than stream_info_file. Setting FS
++    // makes check_origin(FS, FS) pass, so media_kit's loadlist path (which
++    // rewrites entry origin to STREAM_ORIGIN_FS) is not rejected with
++    // "Refusing to load potentially unsafe URL from a playlist".
++    .stream_origin = STREAM_ORIGIN_FS,
++};
++
++/* ---------- auto-detect Blu-ray ISO over HTTP(S) ---------- */
++/*
++ * Open http(s) Blu-ray images directly, including extension-less URLs.
++ * Returns STREAM_UNSUPPORTED on miss so stream_info_ffmpeg takes over.
++ */
++static int bdmv_http_stream_open(stream_t *stream)
++{
++    // Fast path: skip well-known non-disc extensions, zero extra network cost.
++    static const char *const skip_ext[] = {
++        ".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flv",
++        ".ts", ".m2ts", ".m4s",
++        ".m3u8", ".mpd", ".m3u", ".pls",
++        ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav",
++        ".srt", ".ass", ".ssa", ".vtt", ".json", ".xml", NULL
++    };
++
++    const char *url = stream->url ? stream->url : "";
++    // Only look at the part before '?' / '#', so that ".iso?token=..." matches.
++    bstr base = { (uint8_t *)url, strcspn(url, "?#") };
++    for (int i = 0; skip_ext[i]; i++) {
++        if (bstr_case_endswith(base, bstr0(skip_ext[i])))
++            return STREAM_UNSUPPORTED;
++    }
++
++    if (!stream->access_references)
++        return STREAM_UNSUPPORTED;
++
++    struct bluray_priv_s *priv = talloc_zero(stream, struct bluray_priv_s);
++    stream->priv = priv;
++    priv->cfg_title = BLURAY_DEFAULT_TITLE;
++    priv->cfg_device = talloc_strdup(priv, url);
++
++    // Routes to open_bd_http() when cfg_device is http(s).
++    int r = bluray_stream_open_internal(stream);
++    if (r != STREAM_OK) {
++        talloc_free(priv);
++        stream->priv = NULL;
++        return STREAM_UNSUPPORTED;
++    }
++    MP_INFO(stream, "Blu-ray ISO over HTTP detected.\n");
++    return r;
++}
++
++const stream_info_t stream_info_bdmv_http = {
++    .name = "bdmv-http",
++    .open = bdmv_http_stream_open,
++    .protocols = (const char *const[]){ "http", "https", NULL },
++    // STREAM_ORIGIN_NET (not UNSAFE): media_kit's loadlist rewrites entry
++    // origin to STREAM_ORIGIN_FS; check_origin(FS, UNSAFE) == 0 would be
++    // rejected, while check_origin(FS, NET) passes.
++    .stream_origin = STREAM_ORIGIN_NET,
++};
++
+--- a/stream/stream.c
++++ b/stream/stream.c
+@@ -56,6 +56,7 @@
+ extern const stream_info_t stream_info_ifo_dvdnav;
+ extern const stream_info_t stream_info_dvdnav;
+ extern const stream_info_t stream_info_bdmv_dir;
++extern const stream_info_t stream_info_bdmv_http;
+ extern const stream_info_t stream_info_bluray;
+ extern const stream_info_t stream_info_bdnav;
+ extern const stream_info_t stream_info_edl;
+@@ -66,6 +67,9 @@
+ #if HAVE_CDDA
+     &stream_info_cdda,
+ #endif
++#if HAVE_LIBBLURAY
++    &stream_info_bdmv_http,   /* must precede stream_info_ffmpeg */
++#endif
+     &stream_info_ffmpeg,
+     &stream_info_ffmpeg_unsafe,
+     &stream_info_avdevice,
+--- a/demux/demux.h
++++ b/demux/demux.h
+@@ -111,6 +111,9 @@
+     // If *pkt is NULL (the value when this function is called), the call
+     // will be repeated.
+     bool (*read_packet)(struct demuxer *demuxer, struct demux_packet **pkt);
++    // Backported from mpv 0.40: drop internal buffers without a low level
++    // byte seek. Used by demux_disc.c d_seek().
++    void (*drop_buffers)(struct demuxer *demuxer);
+     void (*close)(struct demuxer *demuxer);
+     void (*seek)(struct demuxer *demuxer, double rel_seek_secs, int flags);
+     void (*switched_tracks)(struct demuxer *demuxer);
+--- a/demux/demux_lavf.c
++++ b/demux/demux_lavf.c
+@@ -1423,6 +1423,30 @@
+ }
+ 
+ 
++/* Backported from mpv 0.40 (demux/demux_lavf.c).
++ *
++ * Drop everything the lavf demuxer has buffered, WITHOUT doing a low level
++ * byte seek on the underlying stream. demux_disc.c used to force-reset its
++ * lavf sub-demuxer with demux_seek(slave, 0, SEEK_FACTOR | SEEK_FORCE), which
++ * ends up calling stream_seek(s, 0). For Blu-ray that byte seek is meaningless
++ * (libbluray owns the read position; real seeking goes through bd_seek_time()),
++ * and forwarding it to bd_seek() drags libbluray back to byte 0 of the ISO,
++ * i.e. the UDF metadata area. Observed symptoms:
++ *   "reset to time: 12.716444"                (constant, any seek target)
++ *   "playback restart complete @ 13.507944"   (playback rewinds to start)
++ *   "PES packet size mismatch" / "Packet corrupt" / "PTS discontinuity"
++ *     -> h264 corruption, VideoToolbox -12909, "Error decoding audio."
++ */
++static void demux_drop_buffers_lavf(demuxer_t *demuxer)
++{
++    lavf_priv_t *priv = demuxer->priv;
++    av_seek_frame(priv->avfc, -1, 0, 1);
++    demux_flush(demuxer);
++    stream_drop_buffers(priv->stream);
++    avio_flush(priv->avfc->pb);
++    avformat_flush(priv->avfc);
++}
++
+ const demuxer_desc_t demuxer_desc_lavf = {
+     .name = "lavf",
+     .desc = "libavformat",
+@@ -1431,4 +1455,5 @@
+     .close = demux_close_lavf,
+     .seek = demux_seek_lavf,
+     .switched_tracks = demux_lavf_switched_tracks,
++    .drop_buffers = demux_drop_buffers_lavf,
+ };
+--- a/demux/demux_disc.c
++++ b/demux/demux_disc.c
+@@ -177,16 +177,28 @@
+ 
+     MP_VERBOSE(demuxer, "seek to: %f\n", seek_pts);
+ 
+-    // Supposed to induce a seek reset. Does it even work? I don't know.
+-    // It will log some bogus error messages, since the demuxer will try a
+-    // low level seek, which will obviously not work. But it will probably
+-    // clear its internal buffers.
+-    demux_seek(p->slave, 0, SEEK_FACTOR | SEEK_FORCE);
+-    stream_drop_buffers(demuxer->stream);
+-
++    // Backported from mpv 0.40.
++    //
++    // The old code did:
++    //     demux_seek(p->slave, 0, SEEK_FACTOR | SEEK_FORCE);
++    //     stream_drop_buffers(demuxer->stream);
++    // That low level seek ends up in stream_seek(s, 0). For Blu-ray there is
++    // no meaningful byte addressing (libbluray owns the read position), and if
++    // it is forwarded to bd_seek() libbluray gets dragged back to byte 0 of
++    // the ISO - the UDF metadata area. Playback then restarts at ~13s no
++    // matter what was requested, and the sub-demuxer parses UDF sectors as
++    // mpegts (PES packet size mismatch / Packet corrupt / PTS discontinuity
++    // -> h264 corruption, VideoToolbox -12909, "Error decoding audio.").
++    //
++    // So: seek via the stream's time based control, then drop the slave
++    // demuxer's buffers through the dedicated callback, which never touches
++    // the stream's byte position.
+     double seek_arg[] = {seek_pts, flags};
+     stream_control(demuxer->stream, STREAM_CTRL_SEEK_TO_TIME, seek_arg);
+ 
++    if (p->slave->desc->drop_buffers)
++        p->slave->desc->drop_buffers(p->slave);
++
+     p->seek_reinit = true;
+ }

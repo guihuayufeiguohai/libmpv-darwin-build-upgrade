@@ -1,0 +1,168 @@
+diff --git a/stream/stream_bluray.c b/stream/stream_bluray.c
+index 42a27b5..fdcb4c7 100644
+--- a/stream/stream_bluray.c
++++ b/stream/stream_bluray.c
+@@ -27,6 +27,8 @@
+  */
+ 
+ #include <string.h>
++#include <strings.h>
++#include <stdio.h>
+ #include <assert.h>
+ 
+ #include <libbluray/bluray.h>
+@@ -101,8 +103,79 @@ struct bluray_priv_s {
+ 
+     struct mp_bluray_opts *opts;
+     struct m_config_cache *opts_cache;
++
++    // Set when the disc is read through an mpv stream (http/https) instead of
++    // libbluray opening the device itself. Owned by us, freed in close().
++    struct stream *http_stream;
+ };
+ 
++// Declared in stream/stream_lavf.c; used to force the http/https stream
++// implementation instead of autoprobing.
++extern const stream_info_t stream_info_ffmpeg;
++
++/* ---------- HTTP Blu-ray stream callback & opener ---------- */
++static int http_read_cb(void *handle, void *buf, int lba, int num_blocks)
++{
++    struct stream *s = handle;
++    int64_t pos = (int64_t)lba * 2048;
++
++    // stream_seek() returns bool, never a negative value, so the historic
++    // `if (stream_seek(s, pos) < 0)` was always false: a failed seek was
++    // silently ignored and the read below then returned bytes from the OLD
++    // position, producing corrupt mpegts packets.
++    if (!stream_seek(s, pos))
++        return -1;
++
++    int size = num_blocks * 2048;
++    int read_bytes = stream_read(s, buf, size);
++    if (read_bytes != size)
++        return -1;
++    return num_blocks;
++}
++
++static int open_bd_http(stream_t *stream, const char *url)
++{
++    struct bluray_priv_s *b = stream->priv;
++    struct mpv_global *global = stream->global;
++
++    // Force the ffmpeg (http/https) implementation:
++    //  * .sinfo avoids autoprobing -- autoprobe would re-enter
++    //    bdmv_dir_stream_open() (registered ahead of stream_info_ffmpeg) and
++    //    recurse until the stack overflows.
++    //  * STREAM_READ alone leaves origin at 0, and check_origin(0, NET) == 0,
++    //    so the http stream would be rejected as STREAM_UNSAFE.
++    struct stream_open_args args = {
++        .global = global,
++        .flags  = STREAM_READ | STREAM_ORIGIN_DIRECT,
++        .url    = url,
++        .sinfo  = &stream_info_ffmpeg,
++    };
++    struct stream *http_stream = NULL;
++    stream_create_with_args(&args, &http_stream);
++    if (!http_stream)
++        return STREAM_UNSUPPORTED;
++
++    // bd_init() gives us an unopened handle we can attach a read callback to.
++    BLURAY *bd = bd_init();
++    if (!bd) {
++        free_stream(http_stream);
++        return STREAM_UNSUPPORTED;
++    }
++
++    if (bd_open_stream(bd, http_stream, http_read_cb) <= 0) {
++        bd_close(bd);
++        free_stream(http_stream);
++        return STREAM_UNSUPPORTED;
++    }
++
++    b->bd = bd;
++    b->http_stream = http_stream;
++
++    MP_VERBOSE(stream, "Opened Blu-ray over HTTP: %s\n", url);
++    return STREAM_OK;
++}
++/* ---------- end of HTTP additions ---------- */
++
+ inline static int play_playlist(struct bluray_priv_s *priv, int playlist)
+ {
+     return bd_select_playlist(priv->bd, playlist);
+@@ -123,6 +196,8 @@ static void bluray_stream_close(stream_t *s)
+         bd_free_title_info(priv->title_info);
+     if (priv->bd)
+         bd_close(priv->bd);
++    if (priv->http_stream)
++        free_stream(priv->http_stream);
+ }
+ 
+ static void handle_event(stream_t *s, const BD_EVENT *ev)
+@@ -435,16 +510,27 @@ static int bluray_stream_open_internal(stream_t *s)
+     if (!mp_msg_test(s->log, MSGL_DEBUG))
+         bd_set_debug_mask(0);
+ 
+-    /* open device */
+-    char *device_tmp = mp_get_user_path(NULL, s->global, device);
+-    BLURAY *bd = bd_open(device_tmp, NULL);
+-    talloc_free(device_tmp);
+-    if (!bd) {
+-        MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
+-        ret = STREAM_UNSUPPORTED;
+-        goto err;
++    /* ---- Detect HTTP URL and use the streaming path ---- */
++    bool is_http = strncmp(device, "http://", 7) == 0 ||
++                   strncmp(device, "https://", 8) == 0;
++    if (is_http) {
++        ret = open_bd_http(s, device);
++        if (ret != STREAM_OK)
++            goto err;
++    } else {
++        /* open device */
++        char *device_tmp = mp_get_user_path(NULL, s->global, device);
++        BLURAY *bd = bd_open(device_tmp, NULL);
++        talloc_free(device_tmp);
++        if (!bd) {
++            MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
++            ret = STREAM_UNSUPPORTED;
++            goto err;
++        }
++        b->bd = bd;
+     }
+-    b->bd = bd;
++
++    BLURAY *bd = b->bd;
+ 
+     if (!check_disc_info(s)) {
+         ret = STREAM_UNSUPPORTED;
+@@ -486,6 +572,12 @@ static int bluray_stream_open_internal(stream_t *s)
+ 
+     select_initial_title(s, bd_get_main_title(bd));
+ 
++    // Demuxing starts from wherever libbluray currently is. After
++    // bd_select_title() some discs report a non-zero position, and
++    // demux_disc reset_pts() then rebases the whole timeline onto it, so
++    // playback begins tens of seconds in instead of at 0. Rewind explicitly.
++    bd_seek_time(b->bd, 0);
++
+     if (!bd_select_angle(bd, b->opts->angle - 1))
+         MP_WARN(s, "Couldn't select angle '%d'.\n", b->opts->angle - 1);
+ 
+@@ -620,6 +712,15 @@ static int bdmv_dir_stream_open(stream_t *stream)
+     if (!path)
+         goto unsupported;
+ 
++    // Blu-ray ISO image / raw image. v0.41 only probes BDMV directories, so a
++    // plain .iso path would never reach libbluray.
++    if (bstr_case_endswith(bstr0(path), bstr0(".iso")) ||
++        bstr_case_endswith(bstr0(path), bstr0(".img")))
++    {
++        priv->cfg_device = talloc_strdup(priv, path);
++        return bluray_stream_open_internal(stream);
++    }
++
+     // We allow the path to point to a directory containing BDMV/, a
+     // directory containing MovieObject.bdmv, or that file itself.
+     if (!check_bdmv(path)) {

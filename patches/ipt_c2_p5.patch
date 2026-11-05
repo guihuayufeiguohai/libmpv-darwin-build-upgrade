@@ -1,0 +1,154 @@
+# IPT-C2 (Dolby Vision Profile 5) colour decode for mpv 0.36.0
+# Maps IPTPQc2 -> linear RGB so P5 no longer renders green.
+# Verify: hunk count must be 3 (csputils.h, csputils.c, video_shaders.c)
+
+--- a/video/csputils.h	2023-07-24 01:10:36.000000000 +0800
++++ b/video/csputils.h	2026-11-02 21:41:47.380926000 +0800
+@@ -38,6 +38,7 @@
+     MP_CSP_RGB,
+     MP_CSP_XYZ,
+     MP_CSP_YCGCO,
++    MP_CSP_IPT_C2,
+     MP_CSP_COUNT
+ };
+ 
+@@ -279,6 +280,7 @@
+ void mp_get_csp_uint_mul(enum mp_csp csp, enum mp_csp_levels levels,
+                          int bits, int component, double *out_m, double *out_o);
+ void mp_get_csp_matrix(struct mp_csp_params *params, struct mp_cmat *out);
++void mp_get_ipt_lms2rgb_matrix(float m[3][3]);
+ 
+ void mp_invert_matrix3x3(float m[3][3]);
+ void mp_invert_cmat(struct mp_cmat *out, struct mp_cmat *in);
+--- a/video/csputils.c	2023-07-24 01:10:36.000000000 +0800
++++ b/video/csputils.c	2026-11-02 21:46:43.402926000 +0800
+@@ -42,6 +42,7 @@
+     {"rgb",         MP_CSP_RGB},
+     {"xyz",         MP_CSP_XYZ},
+     {"ycgco",       MP_CSP_YCGCO},
++    {"ipt-c2",      MP_CSP_IPT_C2},
+     {0}
+ };
+ 
+@@ -777,6 +778,30 @@
+ }
+ 
+ // get the coefficients of the yuv -> rgb conversion matrix
++// IPT-C2 step 3: convert linear LMS to linear RGB.
++//
++// This is the inverse of (crosstalk * HPE_XYZ2LMS * RGB2XYZ), evaluated for
++// BT.2020 primaries at D65 -- which is what Dolby Vision Profile 5 is
++// defined against. Computed numerically:
++//   crosstalk(4%) = {0.92,0.04,0.04},{0.04,0.92,0.04},{0.04,0.04,0.92}
++//   HPE XYZ->LMS  = { 0.40024, 0.70760, -0.08081},
++//                   {-0.22630, 1.16532,  0.04570},
++//                   { 0.00000, 0.00000,  0.91822}
++// (both from libplacebo pl_ipt_rgb2lms)
++//
++// Because IPT-C2 is fixed to BT.2020, this is a constant matrix.
++void mp_get_ipt_lms2rgb_matrix(float m[3][3])
++{
++    static const float lms2rgb[3][3] = {
++        {  3.4368148f, -2.5067738f,  0.0699519f},
++        { -0.7910582f,  1.9836017f, -0.1925448f},
++        { -0.0257268f, -0.0991418f,  1.1248741f},
++    };
++    for (int i = 0; i < 3; i++)
++        for (int j = 0; j < 3; j++)
++            m[i][j] = lms2rgb[i][j];
++}
++
+ void mp_get_csp_matrix(struct mp_csp_params *params, struct mp_cmat *m)
+ {
+     enum mp_csp colorspace = params->color.space;
+@@ -822,6 +847,33 @@
+         };
+         break;
+     }
++    case MP_CSP_IPT_C2: {
++        // Dolby Vision Profile 5 (IPT-PQ-C2, ITU-T H.273 code 15).
++        //
++        // This is NOT an affine YCbCr matrix. IPT-C2 splits into two 3x3
++        // matrices with the PQ EOTF in between:
++        //
++        //   1. IPT -> L'M'S'   (matrix below; operates on PQ-encoded values)
++        //   2. PQ EOTF         (per-channel, handled by the normal TRC path)
++        //   3. LMS  -> linear RGB (see mp_get_ipt_lms2rgb_matrix(); applied
++        //      separately in pass_color_map(), AFTER linearization)
++        //
++        // Values taken from libplacebo's pl_ipt_ipt2lms (Ebner & Fairchild
++        // IPT 1998, numerically inverted). Unlike BT.2100 ICtCp, IPT-C2's
++        // LMS space is HPE XYZ->LMS with 4% cone crosstalk, hence the
++        // different coefficients.
++        *m = (struct mp_cmat) {
++            {{ 1.0,  0.0975689,  0.205226},
++             { 1.0, -0.1138760,  0.133217},
++             { 1.0,  0.0326151, -0.676887}},
++        };
++        // IPT-C2 is carried full-range: I spans [0,1] while P and T are
++        // offset-binary centred at 0.5. Limited range would clamp I and
++        // mis-centre P/T, so force full range regardless of what the
++        // container claims.
++        levels_in = MP_CSP_LEVELS_PC;
++        break;
++    }
+     default:
+         MP_ASSERT_UNREACHABLE();
+     };
+--- a/video/out/gpu/video_shaders.c	2023-07-24 01:10:36.000000000 +0800
++++ b/video/out/gpu/video_shaders.c	2026-11-02 21:42:10.989926000 +0800
+@@ -875,6 +875,20 @@
+         is_linear = true;
+     }
+ 
++    // IPT-C2 (Dolby Vision Profile 5) step 3 of 3.
++    //
++    // At this point the signal is:
++    //   IPT -(csp matrix)-> L'M'S' -(PQ EOTF above)-> linear LMS
++    // so we still have to convert linear LMS to linear RGB before any
++    // tone mapping / gamut mapping happens. (Everything downstream assumes
++    // linear RGB.) IPT-C2 is fixed to BT.2020, so this is a constant matrix.
++    if (src.space == MP_CSP_IPT_C2) {
++        float lms2rgb[3][3];
++        mp_get_ipt_lms2rgb_matrix(lms2rgb);
++        gl_sc_uniform_mat3(sc, "ipt_lms2rgb", true, &lms2rgb[0][0]);
++        GLSL(color.rgb = ipt_lms2rgb * color.rgb;)
++    }
++
+     // Pre-scale the incoming values into an absolute scale
+     GLSLF("color.rgb *= vec3(%f);\n", mp_trc_nom_peak(src.gamma));
+ 
+
+
+--- a/video/mp_image.c
++++ b/video/mp_image.c
+@@ -900,9 +900,10 @@
+         if (params->color.space != MP_CSP_BT_601 &&
+             params->color.space != MP_CSP_BT_709 &&
+             params->color.space != MP_CSP_BT_2020_NC &&
+             params->color.space != MP_CSP_BT_2020_C &&
+             params->color.space != MP_CSP_SMPTE_240M &&
+-            params->color.space != MP_CSP_YCGCO)
++            params->color.space != MP_CSP_YCGCO &&
++            params->color.space != MP_CSP_IPT_C2)
+         {
+             // Makes no sense, so guess instead
+             // YCGCO should be separate, but libavcodec disagrees
+
+--- a/video/out/gpu/video.c
++++ b/video/out/gpu/video.c
+@@ -3732,7 +3732,14 @@
+ static bool check_dumb_mode(struct gl_video *p)
+ {
+     struct gl_video_opts *o = &p->opts;
++    // IPT-C2 (Dolby Vision Profile 5) needs the full colour pipeline: the PQ
++    // EOTF, the L'M'S'->RGB matrix applied in pass_color_map(), tone mapping
++    // and gamut mapping. Dumb mode uploads the texture with no conversion
++    // chain at all, so the picture comes out dark and cold. Force the
++    // advanced path for IPT-C2 only; every other format is unaffected.
++    if (p->real_image_params.color.space == MP_CSP_IPT_C2)
++        return false;
+     if (p->use_integer_conversion)
+         return false;
+     if (o->dumb_mode > 0) // requested by user
+         return true;
