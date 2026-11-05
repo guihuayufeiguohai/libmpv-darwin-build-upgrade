@@ -179,18 +179,36 @@ the libass-free audio build if that is still required.
 
 ## 3. Known risks
 
-1. **`fftools-ffi`** is pinned at commit `9b0d4da0`, which is **already the
-   upstream HEAD** (checked against the GitHub API: the newest commit in
-   `moffatman/fftools-ffi` is `9b0d4da…`, 2026-01-11). There is therefore no
-   newer revision to move to. Its `meson.build` declares no version bounds on
-   the `libav*` dependencies, but its sources are a fork of FFmpeg's `fftools`
-   from the FFmpeg 6 era, so FFmpeg 6 → 7 header/ABI changes are the one
-   remaining unverified risk. It is used **only** by the `encodersgpl` flavor
-   (see `nix/packages/mk-out-libs/default.nix`), never by `default`/`full`.
-   The `melodink` reference build, which also uses FFmpeg 7.0.2, dropped this
-   component entirely. If `encodersgpl` fails to configure, the fix belongs in
-   `fftools-ffi` itself (it vendors its own copies of the fftools sources), not
-   in a patch here.
+1. **`fftools-ffi` — confirmed broken, now disabled.** The macOS/iOS CI run
+   proved this is a hard failure, not a suspicion:
+
+   ```
+   mk-pkg-fftools-ffi-iossimulator-arm64-audio> ... 'nb_side_data' is deprecated ...
+   mk-pkg-fftools-ffi-iossimulator-arm64-audio> 31 warnings generated.
+   mk-pkg-fftools-ffi-iossimulator-arm64-audio> ninja: build stopped: subcommand failed.
+   error: Cannot build '...-mk-pkg-fftools-ffi-iossimulator-arm64-audio-9b0d4da0.drv'.
+   ```
+
+   `mk-out-libs`, `mk-out-archive-libs` and `mk-out-all` then failed purely as
+   downstream consequences.
+
+   Root cause: upstream vendors a fork of FFmpeg's `fftools` from the FFmpeg 6
+   era, and the pinned commit `9b0d4da0` is **already its current HEAD**
+   (verified against the GitHub API — newest commit 2026-01-11), so there is no
+   newer revision to move to. The `melodink` reference build, which also uses
+   FFmpeg 7.0.2, dropped this component for exactly the same reason.
+
+   Resolution: `fftools-ffi` is removed from the `encodersgpl` dependency list
+   in `nix/packages/mk-out-libs/default.nix`, and
+   `nix/packages/mk-pkg-fftools-ffi/targets.nix` now returns `[ ]` so the flake
+   no longer publishes a package that cannot build. The package definition and
+   its `packages.lock.nix` entry are kept; both files document how to re-enable
+   it after a port to FFmpeg 7.
+
+   The rest of that CI run was healthy: FFmpeg 7.0.2 compiled normally for every
+   target (`CC libavfilter/…` for macos-amd64, ios-arm64-video-full,
+   iossimulator-amd64/arm64), which validates the FFmpeg layer together with the
+   project's own `meson.build` / `meson.options` wrapper.
 2. **libplacebo is built without Vulkan** (`-Dvulkan=disabled` in mpv, matching
    the reference build). `vo=gpu-next` therefore runs on the OpenGL backend.
    Full DOVI dynamic-metadata tone mapping on Apple platforms ultimately wants
