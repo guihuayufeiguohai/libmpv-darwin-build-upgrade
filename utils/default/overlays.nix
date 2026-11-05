@@ -1,3 +1,0 @@
-[
-  (import ../../overlays/xcode.nix)
-]
