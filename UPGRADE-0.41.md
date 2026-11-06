@@ -243,3 +243,50 @@ mpv --vo=gpu-next --target-colorspace-hint file.mkv
 
 `vo=gpu-next` requires libplacebo, which is now present; `vo=gpu` (legacy) has
 no DOVI support.
+
+---
+
+## 5. Fixes driven by the macOS/iOS CI runs
+
+### 5.1 `fftools-ffi` removed from the build (first CI failure)
+
+See §3.1. Removed from the `encodersgpl` dependency list in
+`nix/packages/mk-out-libs/default.nix`, and
+`nix/packages/mk-pkg-fftools-ffi/targets.nix` now returns `[ ]` so the flake
+stops publishing a package that cannot build.
+
+### 5.2 Swift build enabled on macOS (second CI failure)
+
+Symptom: mpv 0.41 failed on `macos-amd64-audio` while compiling
+`osdep/mac/app_bridge.m`; libplacebo 7.349.0 and FFmpeg 7.0.2 had both built
+successfully by then.
+
+Cause: `app_bridge.m` contains
+
+```c
+#include "osdep/mac/swift.h"
+```
+
+and `swift.h` is produced by the custom target in `osdep/mac/meson.build`,
+which is only entered when `features['swift']` is true
+(`meson.build`: `if features['swift'] and swift_sources.length() > 0`).
+The old option list left `-Dswift-build=disabled`, while `-Dcocoa=enabled`
+unconditionally pulls `app_bridge.m` into the sources, so the header never
+existed.
+
+Fix, matching what the `melodink` reference build does for the same
+mpv/FFmpeg combination:
+
+* `-Dswift-build=enabled` added to `MACOS_OPTIONS`
+* a `xcrun` shim added to `nativeBuildInputs` on macOS, because mpv resolves
+  the toolchain via `xcrun -find swiftc` and `TOOLS/macos-sdk-version.py`, and
+  neither works inside the Nix sandbox. The shim answers exactly the three
+  queries mpv makes: `-find <tool>`, `--sdk macosx --show-sdk-path` and
+  `--sdk macosx --show-sdk-version` (the last one reads `SDKSettings.json`,
+  falling back to `SDKSettings.plist`)
+* `nix/utils/xctoolchain/swiftc.nix` (already in the tree, previously unused
+  here) added to `nativeBuildInputs` on macOS
+
+Note this is required only because `cocoa` is enabled; it is not a new
+dependency of mpv 0.41 as such.
+
