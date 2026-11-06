@@ -76,6 +76,22 @@ find ${DEPS} -name "*.dylib" -type f | while read DYLIB; do
                 2>/dev/null
         done
 
+    # Drop build-time LC_RPATH entries (see the iOS script for the rationale):
+    # the binary otherwise keeps absolute /nix/store/**/lib search paths that do
+    # not exist on the user's machine, and leaks the build environment.
+    otool -l "${DYLIB}" |
+        awk '$1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+             in_rpath && $1 == "path"          { print $2; in_rpath = 0 }' |
+        while read RPATH; do
+            case "${RPATH}" in
+                @loader_path*|@executable_path*) continue ;;
+            esac
+            install_name_tool -delete_rpath "${RPATH}" "${DYLIB}" 2>/dev/null || true
+        done
+
+    install_name_tool -add_rpath "@loader_path" "${DYLIB}" 2>/dev/null || true
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${DYLIB}" 2>/dev/null || true
+
     # add Info.plist
     mkdir -p "${FRAMEWORK_DIR}/Versions/A/Resources"
     cp --no-preserve=mode ${INFO_PLIST_PATH} "${FRAMEWORK_DIR}/Versions/A/Resources/Info.plist"

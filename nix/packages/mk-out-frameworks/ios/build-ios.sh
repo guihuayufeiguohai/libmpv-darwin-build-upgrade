@@ -75,6 +75,29 @@ find ${DEPS} -name "*.dylib" -type f | while read DYLIB; do
                 2>/dev/null
         done
 
+    # Drop build-time LC_RPATH entries.
+    # Changing install names above rewrites what dyld looks for, but the binary
+    # still carries the LC_RPATH entries baked in at link time, i.e. absolute
+    # paths into the Nix store such as /nix/store/<hash>-mk-pkg-libplacebo-*/
+    # lib. Those are meaningless on a device and leak the build environment;
+    # dyld also wastes time probing them before falling back. Remove every one
+    # and replace it with the locations that actually exist at runtime: next to
+    # the loading binary (@loader_path) and in the app bundle's Frameworks dir
+    # (@executable_path/Frameworks).
+    otool -l "${DYLIB}" |
+        awk '$1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+             in_rpath && $1 == "path"          { print $2; in_rpath = 0 }' |
+        while read RPATH; do
+            # never strip the ones we are about to add
+            case "${RPATH}" in
+                @loader_path*|@executable_path*) continue ;;
+            esac
+            install_name_tool -delete_rpath "${RPATH}" "${DYLIB}" 2>/dev/null || true
+        done
+
+    install_name_tool -add_rpath "@loader_path" "${DYLIB}" 2>/dev/null || true
+    install_name_tool -add_rpath "@executable_path/Frameworks" "${DYLIB}" 2>/dev/null || true
+
     # add Info.plist
     cp --no-preserve=mode ${INFO_PLIST_PATH} "${FRAMEWORK_DIR}/Info.plist"
     sed -i 's/${FRAMEWORK_NAME}/'${FRAMEWORK_NAME}'/g' "${FRAMEWORK_DIR}/Info.plist"

@@ -52,6 +52,17 @@ if arch != archs.universal then
     libxml2 = callPackage ../mk-pkg-libxml2/default.nix { };
     uchardet = callPackage ../mk-pkg-uchardet/default.nix { };
     libass = callPackage ../mk-pkg-libass/default.nix { };
+    # libplacebo became a hard dependency of mpv in 0.37 (vo_gpu-next) and is
+    # linked into libmpv, i.e. into Mpv.framework/Mpv. It therefore has to be
+    # shipped as Placebo.framework alongside the other frameworks, otherwise
+    # the app aborts on launch with:
+    #
+    #   Library not loaded: @rpath/Placebo.framework/Placebo
+    #   Referenced from: .../Runner.app/Frameworks/Mpv.framework/Mpv
+    #
+    # mk-out-frameworks derives one framework per dylib found under ${DEPS}, so
+    # simply adding it here is enough to produce Placebo.framework.
+    libplacebo = callPackage ../mk-pkg-libplacebo/default.nix { };
     harfbuzz = callPackage ../mk-pkg-harfbuzz/default.nix { };
     fribidi = callPackage ../mk-pkg-fribidi/default.nix { };
     freetype = callPackage ../mk-pkg-freetype/default.nix { };
@@ -64,6 +75,10 @@ if arch != archs.universal then
         mpv
         ffmpeg
         mbedtls
+        # Required by libmpv itself (not by the video variant only), so this
+        # belongs to the unconditional list: mpv's buildInputs are
+        # [ ffmpeg libplacebo libass ] regardless of variant.
+        libplacebo
       ]
       ++ pkgs.lib.optionals (flavor == flavors.encodersgpl) [
         libvorbis
