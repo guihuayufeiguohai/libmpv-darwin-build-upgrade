@@ -78,12 +78,53 @@ does not carry PTS 0). `STREAM_CTRL_GET_CURRENT_TIME` returned that value as if
 it were the playback position, `demux_disc.c:reset_pts()` adopted it as the
 time base, and `d_read_packet()` then shifted every timestamp by it.
 
-Fix: `stream_bluray.c` now records the offset once, right after the title is
-selected (`update_time_offset()`), and applies it symmetrically:
+Fix: `stream_bluray.c` now records the offset once and applies it
+symmetrically:
 
 - `GET_CURRENT_TIME`: playlist time **minus** offset, clamped at 0
 - `SEEK_TO_TIME`: playback time **plus** offset, clamped at 0
 
-No change to `demux_disc.c` was needed, so DVD and CD playback are untouched.
-The offset is recomputed on `STREAM_CTRL_SET_CURRENT_TITLE`, since each title
-has a different playlist start.
+No change to `demux_disc.c` was needed, so DVD and CD playback is untouched.
+
+**Timing matters.** The first version of this fix sampled the offset in
+`select_initial_title()`, immediately after `bd_select_title()`, which logged
+`Title starts at playlist time 0.000000` and did nothing: `bd_tell_time()` keeps
+returning 0 until libbluray has actually consumed the first clip block.
+`demux_disc.c:d_open()` reads one byte before calling `reset_pts()`, so it saw
+the real value (12.716444) while our offset was still 0. The sample therefore
+had to move into the first successful `bd_read()` inside
+`bluray_stream_fill_buffer()`, guarded by `time_offset_known`.
+`STREAM_CTRL_SET_CURRENT_TITLE` clears that flag so the next title re-samples.
+
+## Seeking was broken for Blu-ray over HTTP (fix in the same patch)
+
+Symptom: after the offset fix, dragging the progress bar did nothing at all on
+HTTP ISOs, and the log filled up with H.264 errors (`non-existing PPS 0
+referenced`, `error while decoding MB ...`) because the decoder was fed packets
+from the wrong position.
+
+```
+[bdmv-http] stream level seek from 167346176 to 4
+[e][bdmv-http] Cannot seek backward in linear streams!
+```
+
+Root cause: the outer stream that libbluray feeds has no meaningful byte address
+space — its content is whatever `bd_read()` de-multiplexes, and repositioning is
+done exclusively through `bd_seek_time()`. mpv nevertheless performs raw byte
+seeks on it: `demux_disc.c:d_seek()` calls
+`p->slave->desc->drop_buffers(p->slave)` right after `STREAM_CTRL_SEEK_TO_TIME`,
+and `demux_drop_buffers_lavf()` begins with `av_seek_frame(avfc, -1, 0, 1)`,
+which reaches `stream_seek(outer, 0)`. With `seekable == false` that fails hard
+and leaves the position state inconsistent. Local `.iso` playback never hit this
+only because `stream_file` happens to be seekable.
+
+Fix: `bluray_stream_open_internal()` now sets `s->seekable = true` and installs
+`bluray_stream_seek()`, a shim that accepts the request, returns success, and
+pins the logical position to `delivered_pos` (the number of bytes `bd_read()`
+has produced so far). Seeks therefore never reach the transport and never fail.
+This mirrors `stream_memory.c`, which also answers every seek with a bare
+`return 1`.
+
+Note that this does not make a Blu-ray seekable by byte offset — it only stops
+mpv's bookkeeping from aborting. Actual repositioning still goes through
+`bd_seek_time()` with the offset applied.
