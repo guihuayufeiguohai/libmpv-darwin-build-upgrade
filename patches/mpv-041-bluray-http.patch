@@ -1,5 +1,28 @@
+diff --git a/stream/stream.c b/stream/stream.c
+index 3551f16..ff35450 100644
+--- a/stream/stream.c
++++ b/stream/stream.c
+@@ -57,6 +57,7 @@ extern const stream_info_t stream_info_fd;
+ extern const stream_info_t stream_info_ifo_dvdnav;
+ extern const stream_info_t stream_info_dvdnav;
+ extern const stream_info_t stream_info_bdmv_dir;
++extern const stream_info_t stream_info_bdmv_http;
+ extern const stream_info_t stream_info_bluray;
+ extern const stream_info_t stream_info_edl;
+ extern const stream_info_t stream_info_libarchive;
+@@ -78,6 +79,10 @@ static const stream_info_t *const stream_list[] = {
+ #if HAVE_LIBBLURAY
+     &stream_info_bdmv_dir,
+     &stream_info_bluray,
++    // Must precede stream_info_ffmpeg, otherwise an ISO served over HTTP is
++    // probed by libavformat as raw MPEG-PS and plays as a black screen with an
++    // absurd duration.
++    &stream_info_bdmv_http,
+ #endif
+ #if HAVE_LIBARCHIVE
+     &stream_info_libarchive,
 diff --git a/stream/stream_bluray.c b/stream/stream_bluray.c
-index 42a27b5..fdcb4c7 100644
+index 42a27b5..3135efd 100644
 --- a/stream/stream_bluray.c
 +++ b/stream/stream_bluray.c
 @@ -27,6 +27,8 @@
@@ -11,10 +34,28 @@ index 42a27b5..fdcb4c7 100644
  #include <assert.h>
  
  #include <libbluray/bluray.h>
-@@ -101,8 +103,79 @@ struct bluray_priv_s {
+@@ -101,8 +103,97 @@ struct bluray_priv_s {
  
      struct mp_bluray_opts *opts;
      struct m_config_cache *opts_cache;
++
++    // Offset (in mpv seconds) between libbluray's playlist timeline and the
++    // playback timeline of the selected title.
++    //
++    // bd_tell_time() and bd_seek_time() both use the playlist timeline, whose
++    // zero point is the start of the playlist - not the start of the title the
++    // user picked. For a real disc the selected title's first clip starts at a
++    // non-zero playlist time (CLPI presentation_start_time; the first PES
++    // packet of a clip never carries PTS 0), so bd_tell_time() right after
++    // bd_select_title() returns something like 12.7 s instead of 0.
++    //
++    // Reporting that value verbatim as the current playback time makes
++    // demux_disc.c adopt it as the time base, which shifts the entire timeline
++    // by that amount: playback starts mid-title, the OSD clock is wrong, and
++    // seeking to 0 lands on a non-zero position.
++    //
++    // Fixed once per title selection, see update_time_offset().
++    double time_offset;
 +
 +    // Set when the disc is read through an mpv stream (http/https) instead of
 +    // libbluray opening the device itself. Owned by us, freed in close().
@@ -91,7 +132,7 @@ index 42a27b5..fdcb4c7 100644
  inline static int play_playlist(struct bluray_priv_s *priv, int playlist)
  {
      return bd_select_playlist(priv->bd, playlist);
-@@ -123,6 +196,8 @@ static void bluray_stream_close(stream_t *s)
+@@ -123,6 +214,8 @@ static void bluray_stream_close(stream_t *s)
          bd_free_title_info(priv->title_info);
      if (priv->bd)
          bd_close(priv->bd);
@@ -100,7 +141,80 @@ index 42a27b5..fdcb4c7 100644
  }
  
  static void handle_event(stream_t *s, const BD_EVENT *ev)
-@@ -435,16 +510,27 @@ static int bluray_stream_open_internal(stream_t *s)
+@@ -185,6 +278,8 @@ static int bluray_stream_fill_buffer(stream_t *s, void *buf, int len)
+     return bd_read(b->bd, buf, len);
+ }
+ 
++static void update_time_offset(stream_t *s);
++
+ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
+ {
+     struct bluray_priv_s *b = s->priv;
+@@ -215,6 +310,9 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
+         if (title >= b->num_titles || !play_title(b, title))
+             return STREAM_UNSUPPORTED;
+         b->current_title = title;
++        // A different title starts at a different playlist time, so the
++        // playlist-to-playback mapping has to be recomputed.
++        update_time_offset(s);
+         return STREAM_OK;
+     }
+     case STREAM_CTRL_GET_CURRENT_TITLE: {
+@@ -233,12 +331,18 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
+         return STREAM_OK;
+     }
+     case STREAM_CTRL_GET_CURRENT_TIME: {
+-        *((double *) arg) = BD_TIME_TO_MP(bd_tell_time(b->bd));
++        // Convert playlist time to playback time (see b->time_offset).
++        // Clamped at 0: before the first read, bd_tell_time() can sit a hair
++        // below the offset we recorded, which would otherwise surface as a
++        // tiny negative position.
++        double t = BD_TIME_TO_MP(bd_tell_time(b->bd)) - b->time_offset;
++        *((double *) arg) = MPMAX(t, 0.0);
+         return STREAM_OK;
+     }
+     case STREAM_CTRL_SEEK_TO_TIME: {
++        // Convert playback time to playlist time (see b->time_offset).
+         double pts = *((double *) arg);
+-        bd_seek_time(b->bd, BD_TIME_FROM_MP(pts));
++        bd_seek_time(b->bd, BD_TIME_FROM_MP(MPMAX(pts, 0.0) + b->time_offset));
+         stream_drop_buffers(s);
+         // API makes it hard to determine seeking success
+         return STREAM_OK;
+@@ -380,6 +484,23 @@ static bool check_disc_info(stream_t *s)
+     return true;
+ }
+ 
++// Record the offset between libbluray's playlist timeline and the playback
++// timeline of the currently selected title.
++//
++// Must be called right after a title/playlist has been selected and before any
++// data is read: at that point bd_tell_time() is exactly the playlist time of
++// the title's first clip, which is the offset we want. It is 0 for the handful
++// of discs whose playlist starts at the first clip, and non-zero for real ones.
++static void update_time_offset(stream_t *s)
++{
++    struct bluray_priv_s *b = s->priv;
++
++    b->time_offset = BD_TIME_TO_MP(bd_tell_time(b->bd));
++
++    MP_VERBOSE(s, "Title starts at playlist time %.6f, using it as offset.\n",
++               b->time_offset);
++}
++
+ static void select_initial_title(stream_t *s, int title_guess) {
+     struct bluray_priv_s *b = s->priv;
+ 
+@@ -403,6 +524,8 @@ static void select_initial_title(stream_t *s, int title_guess) {
+             b->current_title = bd_get_current_title(b->bd);
+         }
+     }
++
++    update_time_offset(s);
+ }
+ 
+ static int bluray_stream_open_internal(stream_t *s)
+@@ -435,16 +558,27 @@ static int bluray_stream_open_internal(stream_t *s)
      if (!mp_msg_test(s->log, MSGL_DEBUG))
          bd_set_debug_mask(0);
  
@@ -137,20 +251,7 @@ index 42a27b5..fdcb4c7 100644
  
      if (!check_disc_info(s)) {
          ret = STREAM_UNSUPPORTED;
-@@ -486,6 +572,12 @@ static int bluray_stream_open_internal(stream_t *s)
- 
-     select_initial_title(s, bd_get_main_title(bd));
- 
-+    // Demuxing starts from wherever libbluray currently is. After
-+    // bd_select_title() some discs report a non-zero position, and
-+    // demux_disc reset_pts() then rebases the whole timeline onto it, so
-+    // playback begins tens of seconds in instead of at 0. Rewind explicitly.
-+    bd_seek_time(b->bd, 0);
-+
-     if (!bd_select_angle(bd, b->opts->angle - 1))
-         MP_WARN(s, "Couldn't select angle '%d'.\n", b->opts->angle - 1);
- 
-@@ -620,6 +712,15 @@ static int bdmv_dir_stream_open(stream_t *stream)
+@@ -620,6 +754,15 @@ static int bdmv_dir_stream_open(stream_t *stream)
      if (!path)
          goto unsupported;
  
@@ -166,3 +267,65 @@ index 42a27b5..fdcb4c7 100644
      // We allow the path to point to a directory containing BDMV/, a
      // directory containing MovieObject.bdmv, or that file itself.
      if (!check_bdmv(path)) {
+@@ -655,3 +798,61 @@ const stream_info_t stream_info_bdmv_dir = {
+     .protocols = (const char*const[]){ "file", "", NULL },
+     .stream_origin = STREAM_ORIGIN_UNSAFE,
+ };
++
++/* ---------- auto-detect Blu-ray ISO over HTTP(S) ---------- */
++/*
++ * Open http(s) Blu-ray images directly, including extension-less URLs.
++ * Returns STREAM_UNSUPPORTED on miss so that stream_info_ffmpeg takes over.
++ *
++ * Without this entry point an ISO served over HTTP is handed to libavformat,
++ * which probes the UDF filesystem as raw MPEG-PS ("Found 'mpeg' at score=52"),
++ * yielding a black screen and a nonsensical duration (hours instead of the
++ * real runtime).
++ */
++static int bdmv_http_stream_open(stream_t *stream)
++{
++    // Fast path: skip well-known non-disc extensions, zero extra network cost.
++    static const char *const skip_ext[] = {
++        ".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flv",
++        ".ts", ".m2ts", ".m4s",
++        ".m3u8", ".mpd", ".m3u", ".pls",
++        ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav",
++        ".srt", ".ass", ".ssa", ".vtt", ".json", ".xml", NULL
++    };
++
++    const char *url = stream->url ? stream->url : "";
++    // Only look at the part before '?' / '#', so that ".iso?token=..." matches.
++    bstr base = { (uint8_t *)url, strcspn(url, "?#") };
++    for (int i = 0; skip_ext[i]; i++) {
++        if (bstr_case_endswith(base, bstr0(skip_ext[i])))
++            return STREAM_UNSUPPORTED;
++    }
++
++    if (!stream->access_references)
++        return STREAM_UNSUPPORTED;
++
++    struct bluray_priv_s *priv = talloc_zero(stream, struct bluray_priv_s);
++    stream->priv = priv;
++    priv->cfg_title = BLURAY_DEFAULT_TITLE;
++    priv->cfg_device = talloc_strdup(priv, url);
++
++    // Routes to open_bd_http() because cfg_device is http(s).
++    int r = bluray_stream_open_internal(stream);
++    if (r != STREAM_OK) {
++        talloc_free(priv);
++        stream->priv = NULL;
++        return STREAM_UNSUPPORTED;
++    }
++    MP_INFO(stream, "Blu-ray ISO over HTTP detected.\n");
++    return r;
++}
++
++const stream_info_t stream_info_bdmv_http = {
++    .name = "bdmv-http",
++    .open = bdmv_http_stream_open,
++    .protocols = (const char *const[]){ "http", "https", NULL },
++    // STREAM_ORIGIN_NET (not UNSAFE): media_kit's loadlist rewrites entry
++    // origin to STREAM_ORIGIN_FS; check_origin(FS, UNSAFE) would be rejected,
++    // while check_origin(FS, NET) passes.
++    .stream_origin = STREAM_ORIGIN_NET,
++};
