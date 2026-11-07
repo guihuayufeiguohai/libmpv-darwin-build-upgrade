@@ -23,7 +23,8 @@ in
 #   * lib/            -> libglslang*.a, libSPIRV.a, libMachineIndependent.a, ...
 #   * include/glslang -> glslang headers (incl. build_info.h)
 #   * include/SPIRV  -> SPIRV headers
-#   * include/vulkan -> Vulkan loader/header (used to COMPILE mpv's vulkan code)
+#   * include/vulkan -> Vulkan headers (used to COMPILE mpv's vulkan code)
+#   * include/vk_video -> pulled in unconditionally by vulkan_core.h (1.4+)
 #   * share/vulkan/registry/vk.xml -> for -Dvulkan-registry
 pkgs.stdenvNoCC.mkDerivation {
   name = "vulkan-sdk-${os}-${arch}";
@@ -42,6 +43,16 @@ pkgs.stdenvNoCC.mkDerivation {
 
     # Vulkan headers + registry
     cp -a ${vulkanHeaders}/include/vulkan $out/include/vulkan
+    # vk_video/ is NOT optional from Vulkan-Headers 1.4 on: vulkan_core.h
+    # includes "vk_video/vulkan_video_codec_*.h" unconditionally (Vulkan Video
+    # is core since 1.3), so without this every consumer dies with
+    #   vulkan_core.h:9805:10: fatal error:
+    #   'vk_video/vulkan_video_codec_h264std.h' file not found
+    if [ -d ${vulkanHeaders}/include/vk_video ]; then
+      cp -a ${vulkanHeaders}/include/vk_video $out/include/vk_video
+    fi
+    test -f $out/include/vulkan/vulkan_core.h
+    test -f $out/include/vk_video/vulkan_video_codec_h264std.h
     cp ${vulkanHeaders}/share/vulkan/registry/vk.xml $out/share/vulkan/registry/vk.xml
 
     # vulkan.pc: both consumers resolve Vulkan through pkg-config.
