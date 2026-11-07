@@ -1,0 +1,14 @@
+# Never let git rewrite line endings.
+#
+# Every file in this repo is consumed by Nix, bash, meson or patch(1) on
+# Linux/macOS runners, all of which choke on CRLF:
+#   * a .nix file with CRLF makes the Nix lexer emit a trailing \r inside
+#     the indented string, and the phase script then dies with
+#       /nix/store/...-stdenv/setup: line NNNN: $'\r': command not found
+#   * a .patch file with CRLF no longer applies
+#   * cross-files/*.ini with CRLF break meson's configparser
+#
+# "text" is deliberately unset (-text): files are stored AND checked out
+# byte-for-byte, so what you see on disk is what the runner gets, on every
+# platform, regardless of the user's core.autocrlf setting.
+* -text

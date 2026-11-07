@@ -42,6 +42,20 @@ pkgs.stdenvNoCC.mkDerivation {
       cp -a ${mpvVulkan}/lib/libmpv.dylib $out/lib/ 2>/dev/null || true
       cp -a ${mpvVulkan}/lib/libmpv.a $out/lib/ 2>/dev/null || true
       [ -d ${mpvVulkan}/include ] && cp -a ${mpvVulkan}/include/mpv $out/include/ 2>/dev/null || true
+
+      # mpv is configured with default_library=static, so the expected artefact
+      # is lib/libmpv.a. The two cp lines above are tolerant on purpose (an
+      # upstream switch to shared objects should not break the bundle), which
+      # means an *empty* lib/ would otherwise be packaged and shipped happily.
+      if [ ! -f $out/lib/libmpv.a ] && [ ! -f $out/lib/libmpv.dylib ]; then
+        echo "error: mpv install produced neither libmpv.a nor libmpv.dylib" >&2
+        echo "       contents of ${mpvVulkan}/lib:" >&2
+        ls -l ${mpvVulkan}/lib >&2 || true
+        exit 1
+      fi
+      # media_kit compiles against these; a missing header dir is a broken SDK.
+      test -f $out/include/mpv/mpv.h
+      test -f $out/include/mpv/render_vk.h
     ''
     + (
       if includeMoltenvk then
