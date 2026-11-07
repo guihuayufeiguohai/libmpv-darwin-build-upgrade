@@ -86,6 +86,12 @@ let
     patch -p1 <${../../../patches/mpv-041-vulkan-0004-gpu-next.patch}
     patch -p1 <${../../../patches/mpv-041-vulkan-0005-get-info.patch}
 
+    # Register the Objective-C compiler unconditionally on darwin. mpv gates
+    # add_languages('objc') on the macOS SDK probe, which needs xcrun, which
+    # the nix sandbox does not have -> hwdec_vt_pl.m was compiled as C and
+    # died on 'unknown type name CVMetalTextureCacheRef'.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0006-darwin-objc-language.patch}
+
     cd -
 
     cp -r $src $out

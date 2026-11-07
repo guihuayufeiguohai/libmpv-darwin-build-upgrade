@@ -1,0 +1,22 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -1544,7 +1544,18 @@
+ 
+ # macOS features
+ macos_sdk_version_py = ''
+ if darwin
++    # C-route: register the Objective-C compiler unconditionally on darwin.
++    #
++    # mpv only calls add_languages('objc') further down, inside
++    # `if macos_sdk_version != '0.0'`, and that value only becomes non-zero
++    # when TOOLS/macos-sdk-version.py manages to find xcrun. The nix sandbox
++    # has no xcrun, so the language was never registered and meson compiled
++    # video/out/hwdec/hwdec_vt_pl.m with the *C* compiler. That leaves
++    # __OBJC__ undefined, which makes hwdec_vt.h skip its C fallback
++    # typedefs, and the build dies with
++    #   hwdec_vt.h:53:5: error: unknown type name 'CVMetalTextureCacheRef'
++    add_languages('objc', native: false)
+     macos_sdk_version_py = find_program(join_paths(source_root, 'TOOLS', 'macos-sdk-version.py'),
+                                                    required: true)
+ endif
