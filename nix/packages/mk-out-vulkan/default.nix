@@ -39,16 +39,21 @@ pkgs.stdenvNoCC.mkDerivation {
     ''
       mkdir -p $out/lib $out/include
       # libmpv (self-contained: libplacebo + glslang statically linked)
-      cp -a ${mpvVulkan}/lib/libmpv.dylib $out/lib/ 2>/dev/null || true
-      cp -a ${mpvVulkan}/lib/libmpv.a $out/lib/ 2>/dev/null || true
+      #
+      # Copy the whole lib dir rather than the two names we happen to expect:
+      # meson installs the real object as libmpv.2.dylib plus a relative
+      # symlink libmpv.dylib -> libmpv.2.dylib, and `cp -a` of just the symlink
+      # would leave a dangling link in $out (and silently drop the binary).
+      cp -a ${mpvVulkan}/lib/. $out/lib/
       [ -d ${mpvVulkan}/include ] && cp -a ${mpvVulkan}/include/mpv $out/include/ 2>/dev/null || true
 
-      # mpv is configured with default_library=static, so the expected artefact
-      # is lib/libmpv.a. The two cp lines above are tolerant on purpose (an
-      # upstream switch to shared objects should not break the bundle), which
-      # means an *empty* lib/ would otherwise be packaged and shipped happily.
-      if [ ! -f $out/lib/libmpv.a ] && [ ! -f $out/lib/libmpv.dylib ]; then
-        echo "error: mpv install produced neither libmpv.a nor libmpv.dylib" >&2
+      # mpv 0.41 builds libmpv as a versioned dylib (libmpv.2.dylib) by default;
+      # libmpv.a only appears if default_library is switched to static. Accept
+      # either, but never an empty lib/ - the bundle would look fine and be
+      # unusable.
+      if [ ! -f $out/lib/libmpv.a ] \
+         && ! ls $out/lib/libmpv*.dylib >/dev/null 2>&1; then
+        echo "error: mpv install produced no libmpv (neither .a nor .dylib)" >&2
         echo "       contents of ${mpvVulkan}/lib:" >&2
         ls -l ${mpvVulkan}/lib >&2 || true
         exit 1
