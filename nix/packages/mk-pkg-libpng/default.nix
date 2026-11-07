@@ -39,6 +39,20 @@ let
         unzip ${libpngPatch} -d libpng-patch
         rsync -a libpng-patch/libpng-*/ $src/
 
+        # libpng 1.6.40 still does `#include <fp.h>` on Apple targets, but
+        # fp.h was removed from modern macOS SDKs (Xcode 11+), so clang fails
+        # with "fatal error: 'fp.h' file not found". The very next line is
+        # `#include <math.h>` (which provides isfinite), so dropping the
+        # include is safe. Grep-verify so a future source bump fails loudly
+        # instead of silently reintroducing the broken include.
+        if grep -q 'include <fp.h>' $src/pngpriv.h; then
+          sed -i -E 's@^[[:space:]]*#[[:space:]]*include[[:space:]]*<fp\.h>.*$@/* fp.h removed: absent from modern macOS SDKs */@' $src/pngpriv.h
+        fi
+        if grep -q 'include <fp.h>' $src/pngpriv.h; then
+          echo "libpng: failed to strip <fp.h> include from pngpriv.h" >&2
+          exit 1
+        fi
+
         cp -r $src $out
       '';
 in
