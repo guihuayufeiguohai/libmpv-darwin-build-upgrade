@@ -19,6 +19,16 @@ let
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
 
+  # Only used by the on-failure diagnostics below: a direct probe of the exact
+  # header check mpv's meson performs, so a failed run reports why.
+  xcode = pkgs.darwin.xcode;
+  sdk =
+    if os == oses.ios
+    then "${xcode}/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
+    else "${xcode}/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+  xcClang = "${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang";
+  archFlag = if arch == "amd64" then "x86_64" else "arm64";
+
   # These dependency packages are wired exactly like the baseline OpenGL
   # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded, because
   # libass/uchardet/libbluray/ffmpeg do NOT accept a `variant` argument.
@@ -172,7 +182,34 @@ pkgs.stdenvNoCC.mkDerivation {
       --cross-file ${crossFile} \
       --prefix=$out \
       "''${OPTIONS[@]}" |
-      tee configure.log
+      tee configure.log || {
+        echo "=== meson setup FAILED; diagnostics ===" >&2
+        echo "--- pkg-config vulkan ---" >&2
+        pkg-config --modversion vulkan >&2 || true
+        pkg-config --cflags vulkan >&2 || true
+        echo "--- SDK headers ---" >&2
+        ls -l ${vulkanSdk}/include/vulkan/vulkan_core.h >&2 || true
+        echo "--- env ---" >&2
+        echo "CPATH=$CPATH" >&2
+        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >&2
+        echo "--- configure.log tail ---" >&2
+        tail -n 40 configure.log >&2 || true
+        echo "--- direct header probe with pkg-config cflags ---" >&2
+        printf '%s\n' '#include <vulkan/vulkan_core.h>' \
+          '#ifndef VK_VERSION_1_3' '#error VK_VERSION_1_3 undefined' '#endif' \
+          'int main(void){return 0;}' > probe.c
+        ${xcClang} -arch ${archFlag} -isysroot ${sdk} \
+          $(pkg-config --cflags vulkan) -c probe.c -o probe.o >&2 2>&1 \
+          && echo "probe(pcflags): OK" >&2 \
+          || echo "probe(pcflags): FAILED" >&2
+        ${xcClang} -arch ${archFlag} -isysroot ${sdk} \
+          -I${vulkanSdk}/include -c probe.c -o probe.o >&2 2>&1 \
+          && echo "probe(explicit -I): OK" >&2 \
+          || echo "probe(explicit -I): FAILED" >&2
+        echo "--- meson-log.txt tail ---" >&2
+        tail -n 120 build/meson-logs/meson-log.txt >&2 || true
+        exit 1
+      }
 
     # ---- post-configure assertions --------------------------------------
     # mpv only emits "#define HAVE_<FEATURE> 1" when EVERY prerequisite was
