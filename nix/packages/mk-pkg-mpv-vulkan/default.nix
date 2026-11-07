@@ -90,13 +90,28 @@ let
 
     cp -r $src $out
   '';
+  # mpv ships helper scripts invoked by meson itself, most importantly
+  # TOOLS/macos-sdk-version.py:
+  #   macos_sdk_version_py = find_program(.../TOOLS/macos-sdk-version.py,
+  #                                     required: true)
+  #   macos_sdk_info = run_command(macos_sdk_version_py, check: true)
+  # Its shebang is '#!/usr/bin/env python3', which the nix sandbox cannot
+  # resolve, so meson dies with
+  #   ERROR: Unhandled python OSError. This is probably not a Meson bug, but
+  #   an issue with your build environment.
+  # Rewrite every shebang to a store path (same helper the OpenGL build uses).
+  fixedSource = callPackage ../../utils/patch-shebangs/default.nix {
+    name = "${pname}-fixed-source-${version}";
+    src = patchedSource;
+    inherit nativeBuildInputs;
+  };
 in
 
 pkgs.stdenvNoCC.mkDerivation {
   name = "${pname}-${os}-${arch}-${version}";
   pname = pname;
   inherit version;
-  src = patchedSource;
+  src = fixedSource;
   dontUnpack = true;
   enableParallelBuilding = true;
   inherit nativeBuildInputs;
