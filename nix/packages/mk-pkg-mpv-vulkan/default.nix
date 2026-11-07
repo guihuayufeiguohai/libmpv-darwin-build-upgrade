@@ -19,19 +19,15 @@ let
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
 
-  ffmpeg = callPackage ../mk-pkg-ffmpeg/default.nix {
-    inherit os arch; variant = variants.video;
-  };
-  libplacebo = callPackage ../mk-pkg-libplacebo360/default.nix { inherit os arch; };
-  uchardet = callPackage ../mk-pkg-uchardet/default.nix {
-    inherit os arch; variant = variants.video;
-  };
-  libass = callPackage ../mk-pkg-libass/default.nix {
-    inherit os arch; variant = variants.video;
-  };
-  libbluray = callPackage ../mk-pkg-libbluray/default.nix {
-    inherit os arch; variant = variants.video;
-  };
+  # These dependency packages are wired exactly like the baseline OpenGL
+  # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded, because
+  # libass/uchardet/libbluray/ffmpeg do NOT accept a `variant` argument.
+  # Forwarding `variant` here is what broke the stage-2 eval with
+  # "function called with unexpected argument 'variant'".
+  ffmpeg = callPackage ../mk-pkg-ffmpeg/default.nix { };
+  libplacebo = callPackage ../mk-pkg-libplacebo360/default.nix { };
+  uchardet = callPackage ../mk-pkg-uchardet/default.nix { };
+  libass = callPackage ../mk-pkg-libass/default.nix { };
 
   nativeBuildInputs = [
     pkgs.meson
@@ -85,8 +81,10 @@ pkgs.stdenvNoCC.mkDerivation {
   dontUnpack = true;
   enableParallelBuilding = true;
   inherit nativeBuildInputs;
+  # libbluray is disabled in the Vulkan build (-Dlibbluray=disabled above), so
+  # it is intentionally omitted from buildInputs here.
   buildInputs =
-    [ ffmpeg libplacebo libass uchardet libbluray ];
+    [ ffmpeg libplacebo libass uchardet ];
   configurePhase = ''
     export CFLAGS="-I${vulkanSdk}/include $CFLAGS"
     export CXXFLAGS="-I${vulkanSdk}/include $CXXFLAGS"
@@ -138,7 +136,7 @@ pkgs.stdenvNoCC.mkDerivation {
       -Dlibmpv=true -Dbuild-date=true -Diconv=enabled
     )
     COMMON_VIDEO_OPTIONS=(
-      -Duchardet=enabled -Dzlib=enabled -Dlibbluray=enabled
+      -Duchardet=enabled -Dzlib=enabled
     )
 
     OPTIONS=("''${DISABLE_ALL_OPTIONS[@]}")
