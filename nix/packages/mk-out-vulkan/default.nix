@@ -59,7 +59,9 @@ pkgs.stdenvNoCC.mkDerivation {
         exit 1
       fi
       # media_kit compiles against these; a missing header dir is a broken SDK.
-      test -f $out/include/mpv/mpv.h
+      # NOTE: mpv 0.41 has no umbrella include/mpv/mpv.h (only client.h,
+      # render.h, render_gl.h, render_vk.h, stream_cb.h), so assert those.
+      test -f $out/include/mpv/client.h
       test -f $out/include/mpv/render_vk.h
     ''
     + (
