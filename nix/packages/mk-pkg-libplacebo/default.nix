@@ -68,6 +68,32 @@ let
 
     chmod -R 777 $src/3rdparty
 
+    # libplacebo 7.349.0 enables GPU timer queries on *any* GLES 3.0 context:
+    #
+    #   p->has_queries = gl_test_ext(gpu, "GL_ARB_timer_query", 30, 30);
+    #
+    # The 30/30 thresholds mean GLES 3.0 is treated as equivalent to desktop
+    # GL 3.0, but GL_ARB_timer_query / GL_TIME_ELAPSED does not exist on iOS
+    # GLES (it would need GL_EXT_disjoint_timer_query + GL_TIME_ELAPSED_EXT).
+    # gl_timer_begin() then calls glBeginQuery(GL_TIME_ELAPSED, ...), and the
+    # Apple OpenGLES driver aborts the process with
+    #   "failed assertion ... in beginQuery. unsupported query type" (SIGABRT)
+    # as soon as the first gpu-next frame is dispatched.
+    #
+    # Timer queries only feed shader performance statistics, never rendering,
+    # so disable them. pl_timer_create() then returns NULL, and libplacebo's
+    # pl_timer_destroy() / pl_timer_query() / gl_timer_begin() / gl_timer_end()
+    # all return early on a NULL timer.
+    if ! grep -q 'p->has_queries = gl_test_ext(gpu, "GL_ARB_timer_query", 30, 30);' $src/src/opengl/gpu.c; then
+      echo "libplacebo: timer-query line not found, refusing to build unpatched" >&2
+      exit 1
+    fi
+    sed -i 's|p->has_queries = gl_test_ext(gpu, "GL_ARB_timer_query", 30, 30);|p->has_queries = false; // Darwin GLES: GL_TIME_ELAPSED is unsupported|' $src/src/opengl/gpu.c
+    if ! grep -q 'p->has_queries = false;' $src/src/opengl/gpu.c; then
+      echo "libplacebo: failed to disable timer queries" >&2
+      exit 1
+    fi
+
     cp -r $src $out
   '';
 in
