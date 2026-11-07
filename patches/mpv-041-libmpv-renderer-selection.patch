@@ -65,7 +65,7 @@ index 02efefb..37fa4f6 100644
  extern const struct render_backend_fns render_backend_gpu;
  extern const struct render_backend_fns render_backend_sw;
 diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c
-index 2d95eb8..5479b2f 100644
+index 2d95eb8..ace9478 100644
 --- a/video/out/vo_gpu_next.c
 +++ b/video/out/vo_gpu_next.c
 @@ -158,6 +158,14 @@ struct priv {
@@ -101,7 +101,19 @@ index 2d95eb8..5479b2f 100644
      for (int n = 0; n < subs->num_items; n++) {
          const struct sub_bitmaps *item = subs->items[n];
          if (!item->num_parts || !item->packed)
-@@ -898,7 +911,7 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
+@@ -713,7 +726,10 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
+ 
+         // At this point, we know that the format is supported, query_format()
+         // makes sure of that. Just check if we should use UINT as a fallback.
+-        if (!format_supported(vo, mpi->imgfmt, false))
++        // libmpv/OpenGL never takes it: query_format() only advertises
++        // normalized formats there, and UINT textures generate invalid GLSL
++        // on GLES 3.0 (usampler2D sampled into a vec4 expression).
++        if (!p->libmpv && !format_supported(vo, mpi->imgfmt, false))
+             use_uint = true;
+ 
+         frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt, use_uint);
+@@ -898,7 +914,7 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
      int dither_depth = opts->dither_depth;
      if (dither_depth == 0) {
          struct ra_swapchain *sw = p->ra_ctx->swapchain;
@@ -110,7 +122,7 @@ index 2d95eb8..5479b2f 100644
              dither_depth = sw->fns->color_depth(sw);
          } else if (!pl_color_transfer_is_hdr(target->color.transfer)) {
              dither_depth = 8;
-@@ -1089,7 +1102,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+@@ -1089,7 +1105,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
      bool pass_colorspace = false;
      struct pl_color_space target_csp = {0};
      // TODO: Implement this for all backends
@@ -119,7 +131,7 @@ index 2d95eb8..5479b2f 100644
          target_csp = sw->fns->target_csp(sw);
      if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
          target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
-@@ -1110,9 +1123,13 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+@@ -1110,9 +1126,13 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
      target_csp.hdr.max_fall = 0;
  
      struct pl_color_space hint = {0};
@@ -136,7 +148,7 @@ index 2d95eb8..5479b2f 100644
      // Assume HDR is supported, if target_csp() is not available
      // TODO: Remove this fallback when all backends support target_csp()
      bool target_unknown = target_csp.transfer == PL_COLOR_TRC_UNKNOWN;
-@@ -1182,7 +1199,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+@@ -1182,7 +1202,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
              hint.hdr.max_cll  = target->hdr.max_cll;
              hint.hdr.max_fall = target->hdr.max_fall;
          }
@@ -146,7 +158,7 @@ index 2d95eb8..5479b2f 100644
              pass_colorspace = true;
          if (opts->target_prim)
              hint.primaries = opts->target_prim;
-@@ -1235,12 +1253,22 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+@@ -1235,12 +1256,22 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
      } else if (!target_hint) {
          if (!hint.hdr.min_luma)
              hint.hdr.min_luma = target_csp.hdr.min_luma;
@@ -172,7 +184,27 @@ index 2d95eb8..5479b2f 100644
          if (frame->current) {
              // Advance the queue state to the current PTS to discard unused frames
              struct pl_queue_params qparams = *pl_queue_params(
-@@ -1478,17 +1506,9 @@ static int query_format(struct vo *vo, int format)
+@@ -1468,6 +1499,19 @@ static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
+ static int query_format(struct vo *vo, int format)
+ {
+     struct priv *p = vo->priv;
++    if (p->libmpv) {
++        // The libmpv/OpenGL backend has no hwdec interop, and the upstream
++        // PL_FMT_UINT fallback is unusable on GLES 3.0 without
++        // GL_EXT_texture_norm16: libplacebo registers r16u (integer) but not
++        // r16 (normalized), and the resulting shader samples usampler2D into
++        // a vec4 expression, which fails to compile. Only advertise formats
++        // that upload as normalized textures. mpv then converts high bit
++        // depth sources (yuv420p10 -> yuv420p) before they reach us; the
++        // colour metadata survives, so Dolby Vision IPT-PQ-C2 is still
++        // converted by libplacebo and no longer comes out tinted.
++        return format_supported(vo, format, false);
++    }
++
+     if (ra_hwdec_get(&p->hwdec_ctx, format))
+         return true;
+ 
+@@ -1478,17 +1522,9 @@ static int query_format(struct vo *vo, int format)
      return supported;
  }
  
@@ -192,7 +224,7 @@ index 2d95eb8..5479b2f 100644
      if (mp_rect_equals(&p->src, &src) &&
          mp_rect_equals(&p->dst, &dst) &&
          osd_res_equals(p->osd_res, osd))
-@@ -1500,6 +1520,21 @@ static void resize(struct vo *vo)
+@@ -1500,6 +1536,21 @@ static void resize(struct vo *vo)
      p->dst = dst;
  }
  
@@ -214,7 +246,7 @@ index 2d95eb8..5479b2f 100644
  static int reconfig(struct vo *vo, struct mp_image_params *params)
  {
      struct priv *p = vo->priv;
-@@ -2138,17 +2173,20 @@ static int preinit(struct vo *vo)
+@@ -2138,17 +2189,20 @@ static int preinit(struct vo *vo)
      p->log = vo->log;
  
      struct gl_video_opts *gl_opts = p->opts_cache->opts;
@@ -246,16 +278,21 @@ index 2d95eb8..5479b2f 100644
      p->hwdec_ctx = (struct ra_hwdec_ctx) {
          .log = p->log,
          .global = p->global,
-@@ -2156,16 +2194,25 @@ static int preinit(struct vo *vo)
+@@ -2156,16 +2210,30 @@ static int preinit(struct vo *vo)
      };
  
      vo->hwdec_devs = hwdec_devices_create();
 -    hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
 -    ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
 +    if (p->libmpv) {
-+        // No VO to forward lazy hwdec loading requests to: load them all,
-+        // like the gpu renderer does under libmpv.
-+        ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, true);
++        // libmpv/OpenGL: deliberately NO hwdec interop. mpv's GL hwdec
++        // mappers hand out GL_LUMINANCE / other legacy textures, and
++        // pl_opengl_wrap() cannot map those to a pl_fmt on iOS GLES ("Failed
++        // mapping iformat 6409"), so every hardware-decoded frame fails to
++        // render. Leave hwdec_ctx empty: ra_hwdec_get() then returns NULL and
++        // map_frame() uploads frames from system memory with pl_tex_upload(),
++        // which is fully supported. ctx->hwdec_devs is set to NULL in
++        // libmpv_init() so the core decodes into system memory as well.
 +    } else {
 +        hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
 +        ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
@@ -276,7 +313,7 @@ index 2d95eb8..5479b2f 100644
      p->rr = pl_renderer_create(p->pllog, p->gpu);
      p->queue = pl_queue_create(p->gpu);
      p->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(p->gpu, "r8");
-@@ -2527,7 +2574,10 @@ static void update_render_options(struct vo *vo)
+@@ -2527,7 +2595,10 @@ static void update_render_options(struct vo *vo)
          req_frames += ceilf(pars->params.frame_mixer->kernel->radius) *
                        (pars->params.skip_anti_aliasing ? 1 : 2);
      }
@@ -288,7 +325,7 @@ index 2d95eb8..5479b2f 100644
  
      pars->params.deband_params = opts->deband ? &pars->deband_params : NULL;
      pars->deband_params.iterations = opts->deband_opts->iterations;
-@@ -2650,3 +2700,339 @@ const struct vo_driver video_out_gpu_next = {
+@@ -2650,3 +2721,351 @@ const struct vo_driver video_out_gpu_next = {
      .uninit = uninit,
      .priv_size = sizeof(struct priv),
  };
@@ -379,6 +416,16 @@ index 2d95eb8..5479b2f 100644
 +    }
 +    p->gpu = lp->opengl->gpu;
 +
++    // Sanity check before committing to this backend. Without a normalized
++    // 8-bit texture format there is nowhere to upload video planes: every
++    // frame would fail and the client would only show an uninitialised
++    // (purple) framebuffer. Decline instead -- the renderer chain in
++    // vo_libmpv.c then falls back to gpu (gl_video), which still plays.
++    if (!pl_find_named_fmt(p->gpu, "r8")) {
++        MP_ERR(ctx, "gpu-next: no r8 texture format, declining gpu-next.\n");
++        goto error;
++    }
++
 +    if (preinit(vo) < 0) {
 +        // preinit() already ran uninit() on failure.
 +        mp_mutex_destroy(&vo->params_mutex);
@@ -386,7 +433,9 @@ index 2d95eb8..5479b2f 100644
 +        return MPV_ERROR_UNSUPPORTED;
 +    }
 +
-+    ctx->hwdec_devs = vo->hwdec_devs;
++    // No hwdec devices: see preinit() above. Keeping this NULL makes the
++    // core decode into system memory instead of GL hwdec surfaces.
++    ctx->hwdec_devs = NULL;
 +    ctx->driver_caps = video_out_gpu_next.caps;
 +    return 0;
 +
