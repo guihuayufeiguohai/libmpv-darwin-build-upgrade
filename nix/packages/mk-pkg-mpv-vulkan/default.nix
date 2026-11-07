@@ -24,7 +24,9 @@ let
   # cannot be enabled'. Bake the -I straight into the cross file's built-in
   # options so the probe cannot depend on pkg-config cflags or on env CPATH.
   crossFileVulkan = pkgs.runCommand "mk-cross-file-${os}-${arch}-vulkan.ini" { } ''
-    sed -E "s|^(c_args|cpp_args|objc_args|objcpp_args)( *= *)\[|\1\2['-I${vulkanSdk}/include', |" \
+    # NOTE: '#' is the s/// delimiter on purpose - the pattern uses '|' for
+    # alternation, so '|' cannot also be the delimiter.
+    sed -E "s#^(c_args|cpp_args|objc_args|objcpp_args)( *= *)\[#\1\2['-I${vulkanSdk}/include', #" \
       ${crossFile} > $out
     got=$(grep -c -- "-I${vulkanSdk}/include" $out || true)
     if [ "$got" != "4" ]; then
