@@ -43,23 +43,29 @@ let
   # 11.0 is the real floor for arm64 macOS, so nothing is lost. iOS is
   # unaffected: there TARGET_OS_IPHONE short-circuits the same check. Only the
   # Vulkan cross file is rewritten - the OpenGL build keeps its 10.9 floor.
+  #
+  # Operates on the build-local cross-file.ini, never on $out: $out lives in
+  # the read-only nix store, where `sed -i` cannot create its temp file
+  # ("sed: couldn't open temporary file /nix/store/sedXXXX: Operation not
+  # permitted").
   macosDeploymentTargetFix = pkgs.lib.optionalString (os == oses.macos) ''
-    sed -i 's/-mmacosx-version-min=10\.9/-mmacosx-version-min=11.0/g' $out
-    test "$(grep -c -- '-mmacosx-version-min=11.0' $out)" = "1"
+    sed -i 's/-mmacosx-version-min=10\.9/-mmacosx-version-min=11.0/g' cross-file.ini
+    test "$(grep -c -- '-mmacosx-version-min=11.0' cross-file.ini)" = "1"
   '';
   crossFileVulkan = pkgs.runCommand "mk-cross-file-${os}-${arch}-vulkan.ini" { } ''
     # NOTE: '#' is the s/// delimiter on purpose - the pattern uses '|' for
     # alternation, so '|' cannot also be the delimiter.
     sed -E "s#^(c_args|cpp_args|objc_args|objcpp_args)( *= *)\[#\1\2['-I${vulkanSdk}/include', #" \
-      ${crossFile} > $out
-    got=$(grep -c -- "-I${vulkanSdk}/include" $out || true)
+      ${crossFile} > cross-file.ini
+    got=$(grep -c -- "-I${vulkanSdk}/include" cross-file.ini || true)
     if [ "$got" != "4" ]; then
       echo "cross-file: expected 4 injected -I flags, got $got" >&2
-      cat $out >&2
+      cat cross-file.ini >&2
       exit 1
     fi
 
     ${macosDeploymentTargetFix}
+    cp cross-file.ini $out
   '';
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
