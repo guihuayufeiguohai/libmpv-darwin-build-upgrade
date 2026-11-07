@@ -97,6 +97,12 @@ pkgs.stdenvNoCC.mkDerivation {
     pkgs.python3
     xctoolchainLipo
   ];
+  # libplacebo resolves Vulkan with `dependency('vulkan', required: false)`
+  # (src/vulkan/meson.build). Without the SDK prefix in buildInputs the nixpkgs
+  # pkg-config wrapper never sees vulkan.pc, the lookup reports
+  # "Run-time dependency vulkan found: NO", and meson then dies with
+  # "ERROR: Feature vk-proc-addr cannot be enabled" at that same file.
+  buildInputs = [ vulkanSdk ];
   configurePhase = ''
     # libplacebo's Vulkan backend needs the Vulkan headers on the include path
     # (mpv's vulkan code does too). Add them through CFLAGS/CXXFLAGS so we do
@@ -110,6 +116,8 @@ pkgs.stdenvNoCC.mkDerivation {
     # file's c_args. Missing it only WARNS, and yields a Vulkan backend that
     # cannot compile a single shader at runtime.
     export CPATH="${vulkanSdk}/include:$CPATH"
+    # Belt and braces next to the buildInputs entry above.
+    export PKG_CONFIG_PATH="${vulkanSdk}/lib/pkgconfig:$PKG_CONFIG_PATH"
 
     # -Dvk-proc-addr=enabled: libplacebo then declares (and uses) the loader's
     # vkGetInstanceProcAddr symbol. The SDK's vulkan.pc deliberately carries an
