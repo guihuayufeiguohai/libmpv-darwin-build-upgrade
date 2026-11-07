@@ -41,6 +41,11 @@ jobs:
           extra-conf: |
             sandbox = true
             sandbox-fallback = false
+            # The darwin build sandbox only sees a whitelist of paths; the
+            # system Xcode (clang + iPhoneOS/MacOSX SDKs) lives under
+            # /Applications and must be readable inside the sandbox, otherwise
+            # CMake reports the SDK/clang as "does not exist".
+            extra-sandbox-paths = /Applications
 
       - name: Nix version
         run: nix --version
