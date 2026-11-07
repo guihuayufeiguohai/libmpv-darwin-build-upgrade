@@ -16,18 +16,25 @@ let
   };
   nativeFile = callPackage ../../utils/native-file/default.nix { };
   crossFile = callPackage ../../utils/cross-file/default.nix { };
+  # mpv's Vulkan gate is
+  #   cc.has_header_symbol('vulkan/vulkan_core.h', 'VK_VERSION_1_3',
+  #                        dependencies: vulkan)
+  # and it returns NO when the SDK include dir is not on the compiler's search
+  # path, which silently kills features['vulkan'] -> 'Feature videotoolbox-pl
+  # cannot be enabled'. Bake the -I straight into the cross file's built-in
+  # options so the probe cannot depend on pkg-config cflags or on env CPATH.
+  crossFileVulkan = pkgs.runCommand "mk-cross-file-${os}-${arch}-vulkan.ini" { } ''
+    sed -E "s|^(c_args|cpp_args|objc_args|objcpp_args)( *= *)\[|\1\2['-I${vulkanSdk}/include', |" \
+      ${crossFile} > $out
+    got=$(grep -c -- "-I${vulkanSdk}/include" $out || true)
+    if [ "$got" != "4" ]; then
+      echo "cross-file: expected 4 injected -I flags, got $got" >&2
+      cat $out >&2
+      exit 1
+    fi
+  '';
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
-
-  # Only used by the on-failure diagnostics below: a direct probe of the exact
-  # header check mpv's meson performs, so a failed run reports why.
-  xcode = pkgs.darwin.xcode;
-  sdk =
-    if os == oses.ios
-    then "${xcode}/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
-    else "${xcode}/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
-  xcClang = "${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang";
-  archFlag = if arch == "amd64" then "x86_64" else "arm64";
 
   # These dependency packages are wired exactly like the baseline OpenGL
   # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded, because
@@ -179,37 +186,19 @@ pkgs.stdenvNoCC.mkDerivation {
 
     meson setup build $src \
       --native-file ${nativeFile} \
-      --cross-file ${crossFile} \
+      --cross-file ${crossFileVulkan} \
       --prefix=$out \
       "''${OPTIONS[@]}" |
-      tee configure.log || {
-        echo "=== meson setup FAILED; diagnostics ===" >&2
-        echo "--- pkg-config vulkan ---" >&2
-        pkg-config --modversion vulkan >&2 || true
-        pkg-config --cflags vulkan >&2 || true
-        echo "--- SDK headers ---" >&2
-        ls -l ${vulkanSdk}/include/vulkan/vulkan_core.h >&2 || true
-        echo "--- env ---" >&2
-        echo "CPATH=$CPATH" >&2
-        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >&2
-        echo "--- configure.log tail ---" >&2
-        tail -n 40 configure.log >&2 || true
-        echo "--- direct header probe with pkg-config cflags ---" >&2
-        printf '%s\n' '#include <vulkan/vulkan_core.h>' \
-          '#ifndef VK_VERSION_1_3' '#error VK_VERSION_1_3 undefined' '#endif' \
-          'int main(void){return 0;}' > probe.c
-        ${xcClang} -arch ${archFlag} -isysroot ${sdk} \
-          $(pkg-config --cflags vulkan) -c probe.c -o probe.o >&2 2>&1 \
-          && echo "probe(pcflags): OK" >&2 \
-          || echo "probe(pcflags): FAILED" >&2
-        ${xcClang} -arch ${archFlag} -isysroot ${sdk} \
-          -I${vulkanSdk}/include -c probe.c -o probe.o >&2 2>&1 \
-          && echo "probe(explicit -I): OK" >&2 \
-          || echo "probe(explicit -I): FAILED" >&2
-        echo "--- meson-log.txt tail ---" >&2
-        tail -n 120 build/meson-logs/meson-log.txt >&2 || true
-        exit 1
-      }
+      tee configure.log || true
+
+    if [ ! -f build/config.h ]; then
+      echo "=== meson setup FAILED ===" >&2
+      echo "pkg-config --cflags vulkan: $(pkg-config --cflags vulkan 2>&1)" >&2
+      echo "CPATH=$CPATH" >&2
+      echo "--- vulkan probe as meson ran it ---" >&2
+      grep -B8 'vulkan_core.h' build/meson-logs/meson-log.txt 2>/dev/null | tail -n 30 >&2 || true
+      exit 1
+    fi
 
     # ---- post-configure assertions --------------------------------------
     # mpv only emits "#define HAVE_<FEATURE> 1" when EVERY prerequisite was

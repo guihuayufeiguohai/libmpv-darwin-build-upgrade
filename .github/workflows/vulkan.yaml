@@ -90,7 +90,10 @@ jobs:
         env:
           XCODE_PATH: ${{ steps.xcode_path.outputs.xcode_path }}
         run: |
-          nix build ".#mk-out-vulkan-${{ matrix.os }}-${{ matrix.arch }}" \
+          # -L streams every builder's full log. Without it nix prints only the
+          # last 25 lines of a failed *dependency*, which hides both the meson
+          # diagnostics and the compiler command line.
+          nix build -L ".#mk-out-vulkan-${{ matrix.os }}-${{ matrix.arch }}" \
             --out-link "result-${{ matrix.os }}-${{ matrix.arch }}"
 
       - name: Package
