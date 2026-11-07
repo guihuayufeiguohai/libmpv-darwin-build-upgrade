@@ -22,69 +22,26 @@ index 3551f16..ff35450 100644
  #if HAVE_LIBARCHIVE
      &stream_info_libarchive,
 diff --git a/stream/stream_bluray.c b/stream/stream_bluray.c
-index 42a27b5..cedf9e8 100644
+index 42a27b5..7989824 100644
 --- a/stream/stream_bluray.c
 +++ b/stream/stream_bluray.c
-@@ -27,7 +27,10 @@
+@@ -27,6 +27,8 @@
   */
  
  #include <string.h>
 +#include <strings.h>
 +#include <stdio.h>
  #include <assert.h>
-+#include <inttypes.h>
  
  #include <libbluray/bluray.h>
- #include <libbluray/meta_data.h>
-@@ -101,8 +104,120 @@ struct bluray_priv_s {
+@@ -101,8 +103,79 @@ struct bluray_priv_s {
  
      struct mp_bluray_opts *opts;
      struct m_config_cache *opts_cache;
 +
-+    // Offset (in mpv seconds) between libbluray's playlist timeline and the
-+    // playback timeline of the selected title.
-+    //
-+    // bd_tell_time() and bd_seek_time() both use the playlist timeline, whose
-+    // zero point is the start of the playlist - not the start of the title the
-+    // user picked. For a real disc the selected title's first clip starts at a
-+    // non-zero playlist time (CLPI presentation_start_time; the first PES
-+    // packet of a clip never carries PTS 0), so bd_tell_time() right after
-+    // bd_select_title() returns something like 12.7 s instead of 0.
-+    //
-+    // Reporting that value verbatim as the current playback time makes
-+    // demux_disc.c adopt it as the time base, which shifts the entire timeline
-+    // by that amount: playback starts mid-title, the OSD clock is wrong, and
-+    // seeking to 0 lands on a non-zero position.
-+    //
-+    // Fixed once per title selection, see update_time_offset().
-+    double time_offset;
-+    // Set once the offset has been sampled (after the first successful read).
-+    bool time_offset_known;
-+
 +    // Set when the disc is read through an mpv stream (http/https) instead of
 +    // libbluray opening the device itself. Owned by us, freed in close().
 +    struct stream *http_stream;
-+
-+    // Byte-offset shim for the outer stream (the one libbluray feeds).
-+    //
-+    // The outer stream has no meaningful byte address space: its content is
-+    // what bd_read() de-multiplexes, and repositioning is done exclusively via
-+    // bd_seek_time(). Nevertheless mpv may still perform raw byte seeks on it:
-+    // demux_drop_buffers_lavf() starts with av_seek_frame(avfc, -1, 0, 1),
-+    // which propagates down to stream_seek(outer, 0).
-+    //
-+    // With seekable == false that request fails hard with "Cannot seek backward
-+    // in linear streams!" and leaves the stream's position state inconsistent,
-+    // which broke seeking on Blu-ray over HTTP (a local .iso never hit this
-+    // because stream_file is seekable).
-+    //
-+    // delivered_pos records how many bytes bd_read() has produced, i.e. the
-+    // highest position the byte address space has ever reached. A seek to any
-+    // position <= delivered_pos is answered locally (the data is older than the
-+    // current position and libbluray will not re-deliver it), and a seek past
-+    // it is clamped to delivered_pos. Seeking therefore never reaches the
-+    // underlying transport and never fails.
-+    int64_t delivered_pos;
  };
  
 +// Declared in stream/stream_lavf.c; used to force the http/https stream
@@ -157,7 +114,7 @@ index 42a27b5..cedf9e8 100644
  inline static int play_playlist(struct bluray_priv_s *priv, int playlist)
  {
      return bd_select_playlist(priv->bd, playlist);
-@@ -123,6 +238,8 @@ static void bluray_stream_close(stream_t *s)
+@@ -123,6 +196,8 @@ static void bluray_stream_close(stream_t *s)
          bd_free_title_info(priv->title_info);
      if (priv->bd)
          bd_close(priv->bd);
@@ -166,122 +123,7 @@ index 42a27b5..cedf9e8 100644
  }
  
  static void handle_event(stream_t *s, const BD_EVENT *ev)
-@@ -176,13 +293,55 @@ static void handle_event(stream_t *s, const BD_EVENT *ev)
-     }
- }
- 
-+static void update_time_offset(stream_t *s);
-+
-+// Byte-level seek shim for the outer stream, see struct bluray_priv_s.
-+//
-+// Repositioning inside a Blu-ray is done with bd_seek_time() only; the byte
-+// address space of the outer stream is a side effect of demuxing and cannot be
-+// used to reach a different part of the disc. mpv still issues byte seeks on it
-+// (demux_drop_buffers_lavf() calls av_seek_frame(avfc, -1, 0, 1), which ends up
-+// in stream_seek(outer, 0)), so answer them locally instead of letting them
-+// fail. Returning > 0 tells stream_seek_unbuffered() the seek succeeded; the
-+// stream layer then updates its own position and drops its buffer.
-+static int bluray_stream_seek(stream_t *s, int64_t newpos)
-+{
-+    struct bluray_priv_s *b = s->priv;
-+
-+    MP_VERBOSE(s, "Ignoring byte seek to %" PRId64 " (delivered %" PRId64
-+               " bytes, position is controlled by bd_seek_time).\n",
-+               newpos, b->delivered_pos);
-+
-+    // Pin the logical position to what has actually been handed out. Letting it
-+    // move backwards would make stream_tell() disagree with the data libbluray
-+    // keeps delivering. Returning 1 makes stream_seek_unbuffered() treat the
-+    // request as satisfied and drop its buffer, which is the only effect mpv
-+    // actually needs here.
-+    s->pos = b->delivered_pos;
-+
-+    return 1;
-+}
-+
- static int bluray_stream_fill_buffer(stream_t *s, void *buf, int len)
- {
-     struct bluray_priv_s *b = s->priv;
-     BD_EVENT event;
-     while (bd_get_event(b->bd, &event))
-         handle_event(s, &event);
--    return bd_read(b->bd, buf, len);
-+    int res = bd_read(b->bd, buf, len);
-+
-+    if (res > 0)
-+        b->delivered_pos += res;
-+
-+    // Sample the playlist-to-playback offset after the first successful read:
-+    // bd_tell_time() reports 0 before libbluray has consumed the first clip
-+    // block, and only then returns the playlist time the title starts at.
-+    if (res > 0 && !b->time_offset_known) {
-+        b->time_offset_known = true;
-+        update_time_offset(s);
-+    }
-+
-+    return res;
- }
- 
- static int bluray_stream_control(stream_t *s, int cmd, void *arg)
-@@ -215,6 +374,12 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
-         if (title >= b->num_titles || !play_title(b, title))
-             return STREAM_UNSUPPORTED;
-         b->current_title = title;
-+        // A different title starts at a different playlist time, so the
-+        // playlist-to-playback mapping has to be resampled. bd_tell_time() is
-+        // not meaningful until the first read of the new title, so just drop
-+        // the stale value and let fill_buffer() re-sample it.
-+        b->time_offset_known = false;
-+        b->time_offset = 0;
-         return STREAM_OK;
-     }
-     case STREAM_CTRL_GET_CURRENT_TITLE: {
-@@ -233,12 +398,18 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
-         return STREAM_OK;
-     }
-     case STREAM_CTRL_GET_CURRENT_TIME: {
--        *((double *) arg) = BD_TIME_TO_MP(bd_tell_time(b->bd));
-+        // Convert playlist time to playback time (see b->time_offset).
-+        // Clamped at 0: before the first read, bd_tell_time() can sit a hair
-+        // below the offset we recorded, which would otherwise surface as a
-+        // tiny negative position.
-+        double t = BD_TIME_TO_MP(bd_tell_time(b->bd)) - b->time_offset;
-+        *((double *) arg) = MPMAX(t, 0.0);
-         return STREAM_OK;
-     }
-     case STREAM_CTRL_SEEK_TO_TIME: {
-+        // Convert playback time to playlist time (see b->time_offset).
-         double pts = *((double *) arg);
--        bd_seek_time(b->bd, BD_TIME_FROM_MP(pts));
-+        bd_seek_time(b->bd, BD_TIME_FROM_MP(MPMAX(pts, 0.0) + b->time_offset));
-         stream_drop_buffers(s);
-         // API makes it hard to determine seeking success
-         return STREAM_OK;
-@@ -380,6 +551,23 @@ static bool check_disc_info(stream_t *s)
-     return true;
- }
- 
-+// Record the offset between libbluray's playlist timeline and the playback
-+// timeline of the currently selected title.
-+//
-+// Must be called AFTER the first successful read, not right after selecting the
-+// title. bd_tell_time() reports 0 until libbluray has actually read the first
-+// clip block, so sampling it in select_initial_title() always yields 0 and the
-+// correction becomes a no-op.
-+static void update_time_offset(stream_t *s)
-+{
-+    struct bluray_priv_s *b = s->priv;
-+
-+    b->time_offset = BD_TIME_TO_MP(bd_tell_time(b->bd));
-+
-+    MP_VERBOSE(s, "Title starts at playlist time %.6f, using it as offset.\n",
-+               b->time_offset);
-+}
-+
- static void select_initial_title(stream_t *s, int title_guess) {
-     struct bluray_priv_s *b = s->priv;
- 
-@@ -435,16 +623,27 @@ static int bluray_stream_open_internal(stream_t *s)
+@@ -435,16 +510,27 @@ static int bluray_stream_open_internal(stream_t *s)
      if (!mp_msg_test(s->log, MSGL_DEBUG))
          bd_set_debug_mask(0);
  
@@ -318,23 +160,27 @@ index 42a27b5..cedf9e8 100644
  
      if (!check_disc_info(s)) {
          ret = STREAM_UNSUPPORTED;
-@@ -497,6 +696,15 @@ static int bluray_stream_open_internal(stream_t *s)
-     s->priv        = b;
-     s->demuxer     = "+disc";
+@@ -486,6 +572,19 @@ static int bluray_stream_open_internal(stream_t *s)
  
-+    // Byte seeking is meaningless here (see bluray_stream_seek), but mpv still
-+    // performs it when dropping demuxer buffers. Answer those requests locally
-+    // instead of failing them: with seekable == false every such request aborts
-+    // with "Cannot seek backward in linear streams!" and corrupts the stream
-+    // position, which made seeking unusable for Blu-ray over HTTP. Local .iso
-+    // playback was unaffected only because stream_file happens to be seekable.
-+    s->seekable = true;
-+    s->seek = bluray_stream_seek;
+     select_initial_title(s, bd_get_main_title(bd));
+ 
++    // Rewind to the very beginning of the title.
++    //
++    // demux_disc.c reset_pts() feeds bd_tell_time() into p->base_time and then
++    // rebases every packet with `delta = -p->base_dts + p->base_time`, so a
++    // non-zero base_time shifts the whole timeline: the first packet lands at
++    // ~12.7 s and playback starts mid-title ("reset to time: 12.716444").
++    //
++    // This call also initialises libbluray's playback state. Without it,
++    // seeking misbehaves on some titles (the position never advances past the
++    // first clip, so every seek target collapses onto the same value).
++    if (b->bd)
++        bd_seek_time(b->bd, 0);
 +
-     MP_VERBOSE(s, "Blu-ray successfully opened.\n");
+     if (!bd_select_angle(bd, b->opts->angle - 1))
+         MP_WARN(s, "Couldn't select angle '%d'.\n", b->opts->angle - 1);
  
-     return STREAM_OK;
-@@ -620,6 +828,15 @@ static int bdmv_dir_stream_open(stream_t *stream)
+@@ -620,6 +719,15 @@ static int bdmv_dir_stream_open(stream_t *stream)
      if (!path)
          goto unsupported;
  
@@ -350,7 +196,7 @@ index 42a27b5..cedf9e8 100644
      // We allow the path to point to a directory containing BDMV/, a
      // directory containing MovieObject.bdmv, or that file itself.
      if (!check_bdmv(path)) {
-@@ -655,3 +872,61 @@ const stream_info_t stream_info_bdmv_dir = {
+@@ -655,3 +763,61 @@ const stream_info_t stream_info_bdmv_dir = {
      .protocols = (const char*const[]){ "file", "", NULL },
      .stream_origin = STREAM_ORIGIN_UNSAFE,
  };
