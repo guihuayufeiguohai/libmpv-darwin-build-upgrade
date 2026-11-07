@@ -1,203 +1,110 @@
-# Route C — Vulkan / MoltenVK port for iOS
+# Route C — Vulkan / MoltenVK port (iOS **and** macOS)
 
-Status: **stage 1 complete, stages 2–4 designed but not yet built**.
-This branch is intentionally isolated from `main`: the existing OpenGL-based
-libmpv build is untouched and keeps producing working releases.
+Status: **stage 1 + stage 2 committed, building on CI**. The existing
+OpenGL-based libmpv build on `main` is untouched and keeps producing working
+releases; everything here is isolated on the `vulkan-ios` branch.
+
+> macOS note: the build pipeline (glslang / vulkan-headers / vulkan-sdk /
+> libplacebo360 / mpv-vulkan) is built for **both** macOS (arm64) and iOS
+> (arm64). The **MoltenVK runtime** is only packaged for iOS so far (the
+> `MoltenVK-ios.tar` has an ios-arm64 slice only). macOS needs
+> `MoltenVK-macos.tar`, whose hash is being fetched; until then the macOS bundle
+> ships without it and the README tells you where to drop it.
 
 ## Why staged
 
-There is no existing reference for this combination:
-
 * `mpv_kit` (the only project shipping a Vulkan `vo=libmpv` backend) builds
-  **Windows / Linux / macOS only** — it has no iOS target at all.
-* `MoltenVK-ios.tar` contains an **ios-arm64 slice only**, no simulator slice.
-* `libplacebo`'s Vulkan backend needs a GLSL→SPIR-V compiler (`glslang` or
-  `shaderc`), which this Nix tree does not currently build.
-* Everything here must be validated on a macOS runner; this workspace is
-  Windows and cannot run `nix build`.
+  Windows / Linux / macOS — it has no iOS target, so there is no iOS reference.
+* `libplacebo`'s Vulkan backend needs a GLSL→SPIR-V compiler (`glslang`), which
+  this Nix tree did not build until now.
+* Everything must be validated on a macOS runner; this workspace is Windows and
+  cannot run `nix build`.
 
-Stage 1 therefore delivers only things that are deterministic (a prebuilt
-binary unpack + pkg-config + the four mpv patches) and gives us a CI job whose
-log tells us whether the Nix wiring is correct before touching the compiler
-chain.
+## What is implemented (stage 1 + 2)
 
-## Stage 1 — delivered in this branch
+All new Nix packages are **isolated** from the existing GL packages — they do
+not change the default `mk-out-all` / release outputs.
 
 | File | What it does |
 |---|---|
-| `packages.lock.nix` | Adds `moltenvk = 1.4.2` (`MoltenVK-ios.tar`, sha256 verified locally against the 34,535,424-byte release asset) and `glslang = 16.6.0` (pinned for stage 2). |
-| `nix/packages/mk-pkg-moltenvk/default.nix` | Unpacks MoltenVK into a Nix package: `libMoltenVK.a`, Vulkan 1.3.357 headers, `vk_video`, MoltenVK headers, both XCFrameworks, Apache-2.0 license, and a generated `vulkan.pc`. |
-| `nix/packages/mk-pkg-moltenvk/targets.nix` | Registers **ios-arm64 only** (the archive has no simulator slice). |
-| `patches/mpv-041-vulkan-000{1,2,4,5}-*.patch` | The four mpv_kit patches that add `MPV_RENDER_API_TYPE_VULKAN`, pass imported device extensions to FFmpeg, add the gpu-next Vulkan render backend, and report the active renderer via `get_info`. |
-| `.github/workflows/vulkan-ios.yaml` | Builds `mk-pkg-moltenvk-ios-arm64` on `macos-15`, prints the layout, and uploads `moltenvk-ios-arm64.tar.gz` as a downloadable artifact. |
+| `packages.lock.nix` | Adds `moltenvk 1.4.2`, `glslang 16.6.0`, `libplacebo360 7.360.1`, `libplacebo360-3rdparty-fast_float 8.3.2`. |
+| `nix/packages/mk-pkg-glslang/` | CMake **static** cross-build of glslang 16.6.0 for macOS + iOS (arm64). `ENABLE_OPT=OFF` (no SPIRV-Tools), `ENABLE_HLSL=OFF`, no binaries/tests. |
+| `nix/packages/mk-pkg-vulkan-headers/` | CMake install of Vulkan-Headers (1.3.243) + copies `registry/vk.xml` to `share/vulkan/registry/`. |
+| `nix/packages/mk-pkg-vulkan-sdk/` | Merges glslang + Vulkan-Headers into one prefix: `lib/*.a`, `include/glslang`, `include/SPIRV`, `include/vulkan`, `share/vulkan/registry/vk.xml`. This is what libplacebo's `-Dvulkan-sdk` wants. |
+| `nix/packages/mk-pkg-libplacebo360/` | libplacebo **7.360.1** (the version mpv_kit's Vulkan patches + glslang seds target) built **static** with `-Dvulkan=enabled -Dglslang=enabled -Dopengl=disabled`, plus the two glslang `find_library` seds. 3rdparty: fast_float 8.3.2, glad, jinja, markupsafe, Vulkan-Headers. |
+| `nix/packages/mk-pkg-mpv-vulkan/` | mpv 0.41 built with the four `mpv-041-vulkan-000{1,2,4,5}` patches (instead of the GL renderer-selection patch), `-Dvulkan=enabled -Dgl=disabled -Degl=disabled -Dios-gl=disabled -Dshaderc=disabled -Dspirv-cross=disabled -Dvideotoolbox-pl=enabled`. macOS: coreaudio only (cocoa/swift disabled); iOS: audiounit. |
+| `nix/packages/mk-out-vulkan/` | Aggregates the Vulkan libmpv stack into a drop-in dir: `lib/libmpv.dylib` (libplacebo + glslang statically linked in), `include/mpv`, `moltenvk/` (iOS), `README.md`. |
+| `patches/mpv-041-vulkan-000{1,2,4,5}-*.patch` | mpv_kit patches adding `MPV_RENDER_API_TYPE_VULKAN`, hwdec device extensions, the gpu-next Vulkan render backend, and the active-renderer `get_info`. |
+| `.github/workflows/vulkan-ios.yaml` | (stage 1) builds `mk-pkg-moltenvk-ios-arm64` and uploads it. |
+| `.github/workflows/vulkan.yaml` | (stage 2) matrix build of `mk-out-vulkan-macos-arm64` and `mk-out-vulkan-ios-arm64`, uploads each as `vulkan-bundle-*.tar.gz`. Triggers on push to `vulkan-ios` and manual dispatch. |
 
-**Patch verification** (done locally against a pristine mpv 0.41.0 tree with
-this repo's `mpv-041-audiounit.patch` and `mpv-041-bluray-http.patch`
-already applied): `0001 → 0002 → 0004 → 0005` all apply cleanly and in order.
-The A-route patch `mpv-041-libmpv-renderer-selection.patch` **conflicts** with
-0004 and must NOT be applied on this branch (both rewrite `vo_gpu_next.c` and
-`vo_libmpv.c`). It is kept in `patches/` for reference only.
+### Key design decisions
 
-### How to run stage 1
+* **libplacebo 7.360.1, not 7.349.0.** 7.349.0's `glslang` meson block omits
+  `find_library('glslang')`, so it links no glslang frontend → undefined
+  symbols. 7.360.1 adds it, and mpv_kit's seds target exactly that line. The GL
+  build keeps 7.349.0.
+* **Static libplacebo → static libmpv.** libplacebo + glslang are linked into
+  `libmpv.dylib`, so the host App only embeds `libmpv.dylib` + `MoltenVK`.
+* **`-Dlcms=disabled`** in libplacebo360 (this tree has no lcms2 package; color
+  management is not needed for the first DV test).
+* **MoltenVK is NOT a build input.** mpv/libplacebo only need Vulkan *headers*
+  at compile time; the Vulkan *loader* (MoltenVK) is resolved at runtime by the
+  host App. This is why the macOS build works without the macOS MoltenVK hash.
 
-1. Push this branch as `vulkan-ios` to your fork.
-2. The `vulkan-ios-stage1` workflow starts automatically.
-3. Download the `moltenvk-ios-arm64` artifact from the run page.
+### Patch verification
 
-Expected log lines:
+Done locally against a pristine mpv 0.41.0 tree with `mpv-041-audiounit.patch`
+and `mpv-041-bluray-http.patch` already applied: `0001 → 0002 → 0004 → 0005`
+all apply cleanly in order. The A-route `mpv-041-libmpv-renderer-selection.patch`
+**conflicts** with 0004 and is intentionally not applied here.
 
-```
---- vulkan.pc ---
-prefix=/nix/store/...-mk-pkg-moltenvk-ios-arm64-1.4.2
-...
---- header version ---
-#define VK_HEADER_VERSION 357
---- static lib ---
-... libMoltenVK.a
-```
+## How to build / test
 
-If `nix build` fails at flake evaluation, the error will name the offending
-`mk-pkg-moltenvk` line — send me that log and I will fix the expression.
-
-## Stage 2 — enable Vulkan in libplacebo and mpv (next iteration)
-
-Do this only after stage 1 is green. All changes are gated on
-`os == "ios" && arch == "arm64"`.
-
-### 2.1 glslang (new package `nix/packages/mk-pkg-glslang/`)
-
-Needed because `libplacebo`'s Vulkan renderer compiles generated GLSL into
-SPIR-V at runtime; without it the build succeeds with a meson warning but
-every `pl_pass_create()` fails at runtime.
-
-Build from `packages.lock.nix.glslang` with CMake, mirroring mpv_kit's
-`native/build/deps.sh`:
-
-```
-cmake -S . -B build -G Ninja \
-  -DCMAKE_SYSTEM_NAME=iOS \
-  -DCMAKE_OSX_SYSROOT=<iPhoneOS.sdk> \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DBUILD_SHARED_LIBS=OFF -DENABLE_OPT=OFF \
-  -DGLSLANG_TESTS=OFF -DENABLE_GLSLANG_BINARIES=OFF \
-  -DENABLE_HLSL=OFF -DGLSLANG_ENABLE_INSTALL=ON
-```
-
-`-DENABLE_OPT=OFF` avoids SPIRV-Tools entirely. Install into `$out` and copy
-`$out/share/vulkan/registry/vk.xml` (libplacebo needs it for
-`-Dvulkan-registry`).
-
-> This is the highest-risk piece: this tree's cross toolchain is meson-centric
-> and has no CMake/iOS precedent. Expect one or two CI iterations here.
-
-### 2.2 `nix/packages/mk-pkg-libplacebo/default.nix`
-
-For ios-arm64 only, replace the current options with:
-
-```
--Dvulkan=enabled -Dvk-proc-addr=enabled \
--Dglslang=enabled -Dshaderc=disabled \
--Dvulkan-sdk=<glslang/moltenvk prefix> \
--Dvulkan-registry=<prefix>/share/vulkan/registry/vk.xml \
--Ddovi=enabled -Dlibdovi=disabled
-```
-
-Keep `-Dopengl=enabled` for now so a stock media_kit App still renders while
-the Dart side is being ported. Add `moltenvk` and `glslang` to
-`buildInputs` / `PKG_CONFIG_PATH` so `dependency('vulkan')` resolves through
-the generated `vulkan.pc`.
-
-### 2.3 `nix/packages/mk-pkg-mpv/default.nix`
-
-* Apply the four `mpv-041-vulkan-000{1,2,4,5}-*.patch` files **instead of**
-  `mpv-041-libmpv-renderer-selection.patch` (comment the latter out).
-* Add `-Dvulkan=enabled` for ios-arm64 (keep `-Dvulkan=disabled` for all
-  other targets).
-* Add `moltenvk` + `glslang` to `buildInputs` and set `PKG_CONFIG_PATH` to
-  include `$moltenvk/lib/pkgconfig`.
-* Have `configure.log` assert `HAVE_VULKAN=1`; mpv_kit's `build.sh` does this
-  because `-Dvulkan=enabled` can silently fall back to disabled when the
-  header check fails.
-
-### 2.4 Packaging
-
-Add `MoltenVK.xcframework` to the ios-arm64 `mk-out-xcframeworks` output (or
-ship it as a second archive) so the App can embed it. `mpv_kit` links
-`libMoltenVK` directly into libmpv on macOS; on iOS the App must also embed
-the framework so the host-side `VkInstance` and libmpv use **the same**
-MoltenVK implementation.
-
-### 2.5 Acceptance for stage 2
-
-`configure.log` shows `vulkan` found, and `nix build` produces an
-`Mpv.xcframework` whose binary exports `mpv_render_context_create` plus the
-Vulkan backend symbols. A minimal host that creates a `VkInstance`/`VkDevice`
-should then be able to call `mpv_render_context_create` with
-`MPV_RENDER_API_TYPE_VULKAN` and get `MPV_ERROR_NONE`.
+1. Push this branch as `vulkan-ios` to your fork (or it is already there).
+2. The `vulkan` workflow builds macOS-arm64 and iOS-arm64 bundles.
+3. Download the `vulkan-bundle-ios-arm64` / `vulkan-bundle-macos-arm64`
+   artifacts.
+4. For iOS: replace your App's libmpv with `lib/libmpv.dylib`, embed
+   `moltenvk/MoltenVK.xcframework`, link Metal/CoreVideo/IOSurface/AudioToolbox,
+   and rebuild `media_kit_video`'s `TextureHW` for
+   `MPV_RENDER_API_TYPE_VULKAN` (stage 3, separate repo).
+5. For macOS: same, but drop `MoltenVK-macos.tar`'s
+   `MoltenVK/dynamic/MoltenVK.xcframework` into the bundle first.
 
 ## Stage 3 — media_kit rendering layer (separate repo/branch)
 
-The rendering layer is the `media_kit_video` sub-package, **not** `media_kit`:
+`TextureHW.swift` (iOS and macOS) currently hard-codes
+`MPV_RENDER_API_TYPE_OPENGL` + `mpv_opengl_fbo` + `EAGLContext`. It must be
+rewritten to use `MPV_RENDER_API_TYPE_VULKAN` (the private mpv_kit extension):
+create `VkInstance`/`VkDevice` on the host, enable `VK_EXT_metal_objects`, bind
+each IOSurface as a `VkImage` with `VkImportMetalIOSurfaceInfoEXT`, and pass
+`MPV_RENDER_PARAM_VULKAN_INIT_PARAMS` + `MPV_RENDER_PARAM_VULKAN_IMAGE`. The
+frame synchronisation (mpv_kit uses an image ring + quarantine + timeline
+semaphores) replaces media_kit's three rotating GLES FBOs + `glFlush`.
 
-* `media_kit_video/common/darwin/Classes/plugin/VideoOutput.swift` — selects
-  `TextureHW` vs `TextureSW`, owns register/resize/render scheduling.
-* `media_kit_video/ios/media_kit_video/Sources/media_kit_video/plugin/TextureHW.swift`
-  — today hard-codes `MPV_RENDER_API_TYPE_OPENGL`, `mpv_opengl_init_params`,
-  `mpv_opengl_fbo`, `EAGLContext`, `CVOpenGLESTextureCache`. This is where
-  `TextureGL: resize` and `Cannot get OpenGLES function pointer!` come from.
-* `.../plugin/gles/{OpenGLESHelpers,TextureGLESContext}.swift`
-* macOS mirror under `media_kit_video/macos/.../plugin/`
-* `media_kit_video/ios/media_kit_video.podspec` (currently
-  `GL_SILENCE_DEPRECATION`, `-framework Mpv`)
-* `media_kit_video/lib/src/video_controller/native_video_controller/`
-
-**Good news**: `TextureHW` already implements
-`FlutterTexture.copyPixelBuffer() -> CVPixelBuffer`, and mpv_kit's macOS
-backend also uses an IOSurface-backed `CVPixelBuffer` + `FlutterTexture`.
-The Flutter compositor interface does not need to change — only the producer
-of that pixel buffer does.
-
-Work: create `VkInstance`/`VkDevice` on the host, enable
-`VK_EXT_metal_objects`, bind each IOSurface as a `VkImage` with
-`VkImportMetalIOSurfaceInfoEXT`, pass
-`MPV_RENDER_PARAM_VULKAN_INIT_PARAMS` + `MPV_RENDER_PARAM_VULKAN_IMAGE`, and
-rebuild the frame synchronisation (mpv_kit uses an image ring + quarantine +
-timeline semaphores; media_kit currently rotates three GLES FBOs with
-`glFlush`). Add `Metal`, `CoreVideo`, `IOSurface`, `MoltenVK`, Vulkan headers
-and `volk` to the podspec / `Package.swift`, plus
-`VK_USE_PLATFORM_METAL_EXT`.
-
-Note: `MPV_RENDER_PARAM_VULKAN_*` are **private mpv_kit extensions**, not
-upstream libmpv API. The libmpv patches and the host code must stay on the
-same patch set.
-
-Version alignment: your App currently resolves `media_kit_video 1.3.1`, whose
-Darwin classes live in `ios/Classes/`. The fork's `main` is the Pub-workspace
-layout (`2.0.1`) shown above. Pick one and stay on it.
+`MPV_RENDER_PARAM_VULKAN_*` are **private mpv_kit extensions** — the libmpv
+patches (0001/0002/0004/0005) and the host code must stay on the same patch
+set.
 
 ## Stage 4 — App integration
 
-* Embed `MoltenVK.xcframework` (mpv_kit locates it via
-  `NSBundle.mainBundle.privateFrameworksPath`, trying
-  `MoltenVK.framework/MoltenVK`, `libMoltenVK.dylib`, `libvulkan.1.dylib`).
-* Link `Metal.framework`, `CoreVideo.framework`, `IOSurface.framework`.
-* Use a `FlutterTexture` returning the IOSurface-backed `CVPixelBuffer`;
-  Flutter's Metal compositor samples it directly.
-* Raise the deployment target (MoltenVK 1.4.2 needs a recent iOS; verify
-  against `MoltenVK.xcodeproj` deployment settings).
+* Embed `MoltenVK.xcframework`; mpv_kit locates it via
+  `NSBundle.mainBundle.privateFrameworksPath` (tries `MoltenVK.framework/MoltenVK`,
+  `libMoltenVK.dylib`, `libvulkan.1.dylib`).
+* Link `Metal.framework`, `CoreVideo.framework`, `IOSurface.framework`
+  (+ `CoreAudio`/`AudioToolbox` as appropriate).
+* Flutter `TextureHW` returns the IOSurface-backed `CVPixelBuffer`; Flutter's
+  Metal compositor samples it directly.
+* Keep the OpenGL path for the simulator and as a fallback.
 
-## Risks to keep in mind
+## Risks
 
-1. **Khronos has deprecated MoltenVK** (community best-effort maintenance).
-   It is still the recommended option for iOS, but this is not a stable
-   long-term foundation.
-2. **No simulator build**: only `ios-arm64` real devices can use Vulkan.
-   Keep the OpenGL path for simulator and macOS.
-3. **No local compilation**: every Nix/CMake/meson change here must be
-   validated on the `macos-15` runner. Expect 2–4 CI rounds for stage 2.
-4. **Two repos must move together**: a Vulkan-only libmpv with an unmodified
-   media_kit would simply fail to create a render context. Ship both, or keep
-   OpenGL enabled in libmpv during the transition.
-5. Route A (the GL gpu-next patch on `main`) remains available as a fallback;
-   `MPV_LIBMPV_RENDERER=gpu` restores the legacy gl_video path without a
-   rebuild.
+1. Khronos has deprecated MoltenVK (community best-effort). Still the only
+   iOS option; acceptable for now.
+2. No simulator Vulkan build (only real `ios-arm64`).
+3. No local compilation — every change validated on the `macos-15` runner;
+   expect 2–4 CI rounds for stage 2 (glslang CMake cross + libplacebo/glslang
+   discovery are the likely friction points).
+4. libmpv and media_kit must move together; an unmodified media_kit on a
+   Vulkan-only libmpv will fail to create a render context.

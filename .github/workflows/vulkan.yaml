@@ -1,0 +1,76 @@
+name: vulkan
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的分支 / tag'
+        required: false
+        default: ''
+  push:
+    branches:
+      - "vulkan-ios"
+
+jobs:
+  vulkan:
+    name: vulkan ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: macos-15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            arch: arm64
+          - os: ios
+            arch: arm64
+    steps:
+      - name: Platform info
+        run: |
+          printf "%-23s %s\n" "ProductName:"    "$(/usr/bin/sw_vers -productName)"
+          printf "%-23s %s\n" "ProductVersion:" "$(/usr/bin/sw_vers -productVersion)"
+          printf "%-23s %s\n" "Arch:"           "$(uname -m)"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          extra-conf: |
+            sandbox = true
+            sandbox-fallback = false
+
+      - name: Nix version
+        run: nix --version
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: false
+
+      - name: Xcode path
+        id: xcode_path
+        run: |
+          XCODE_PATH=$(realpath /Applications/Xcode_16.1.0.app)
+          ${XCODE_PATH}/Contents/Developer/usr/bin/xcodebuild -version
+          echo "xcode_path=${XCODE_PATH}" >> $GITHUB_OUTPUT
+
+      - name: Build vulkan bundle
+        env:
+          XCODE_PATH: ${{ steps.xcode_path.outputs.xcode_path }}
+        run: |
+          nix build ".#mk-out-vulkan-${{ matrix.os }}-${{ matrix.arch }}" \
+            --out-link "result-${{ matrix.os }}-${{ matrix.arch }}"
+
+      - name: Package
+        run: |
+          tar -czf "vulkan-bundle-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
+            -C "result-${{ matrix.os }}-${{ matrix.arch }}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: vulkan-bundle-${{ matrix.os }}-${{ matrix.arch }}
+          path: vulkan-bundle-${{ matrix.os }}-${{ matrix.arch }}.tar.gz

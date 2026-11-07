@@ -16,6 +16,21 @@
     url = "https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz";
     sha256 = "9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2";
   };
+  # libplacebo 7.360.1: the Vulkan route pins this exact version because
+  # mpv_kit's Vulkan render-backend patches and glslang meson seds target it
+  # (7.349.0's glslang detection is missing find_library('glslang') and links
+  # nothing -> undefined symbols). The existing GL build keeps 7.349.0.
+  libplacebo360 = {
+    version = "7.360.1";
+    url = "https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/libplacebo-v7.360.1.tar.gz";
+    sha256 = "14c0a99f4b01557ec9826ce6b1d52f6de21be274ba03fd5aab7307f18766dc39";
+  };
+  # libplacebo 7.360.1 needs fast_float >= 8.x (7.349.0 used 5.2.0).
+  libplacebo360-3rdparty-fast_float = {
+    version = "8.3.2";
+    url = "https://github.com/fastfloat/fast_float/archive/refs/tags/v8.3.2.tar.gz";
+    sha256 = "71bb9e865b888df01351558db5a39586d13ea97ada162156b3a07784d8c1b26b";
+  };
   dav1d = {
     version = "1.2.1";
     url = "https://code.videolan.org/videolan/dav1d/-/archive/1.2.1/dav1d-1.2.1.tar.bz2";
