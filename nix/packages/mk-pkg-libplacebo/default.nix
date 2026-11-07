@@ -86,12 +86,18 @@ pkgs.stdenvNoCC.mkDerivation {
     pkgs.python3
   ];
   configurePhase = ''
+    # mpv's gpu-next libmpv render backend needs libplacebo built with
+    # PL_HAVE_OPENGL. The 'auto' default already enables it (glad is vendored
+    # above and the OpenGL sources need no system GL headers), but pin it
+    # explicitly so an upstream default change cannot silently turn gpu-next
+    # -- and with it Dolby Vision Profile 5 -- back off.
     meson setup build $src \
       --native-file ${nativeFile} \
       --cross-file ${crossFile} \
       --prefix=$out \
       -Ddemos=false \
-      -Dtests=false
+      -Dtests=false \
+      -Dopengl=enabled
   '';
   buildPhase = ''
     meson compile -vC build

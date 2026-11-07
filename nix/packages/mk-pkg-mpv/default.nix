@@ -146,6 +146,14 @@ let
     # bluray_autodetect_v036.patch.
     patch -p1 <${../../../patches/mpv-041-bluray-http.patch}
 
+    # libmpv render API: renderer selection with fallback
+    # (auto = gpu-next -> gpu -> software) and a libplacebo/gpu-next backend
+    # for MPV_RENDER_API_TYPE_OPENGL. Without this patch vo=libmpv (the API
+    # media_kit uses) is hard-wired to the legacy gl_video renderer, which
+    # cannot handle Dolby Vision Profile 5 / IPT-PQ-C2: the video is tinted
+    # even though libplacebo is linked in. See patches/README.md.
+    patch -p1 <${../../../patches/mpv-041-libmpv-renderer-selection.patch}
+
     # TODO(mpv-0.41): the following patches were written against 0.36 and do
     # NOT apply to 0.41 -- they are intentionally left out until re-ported:
     #
