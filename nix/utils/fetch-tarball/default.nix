@@ -11,6 +11,11 @@
 #             obtain but whose NAR hash is published authoritatively (for
 #             example nixpkgs' `mpv-unwrapped` entry).
 #
+#   mirrors - optional list of extra URLs tried (in order) if the primary
+#             `url` fails to download. Useful for flaky upstream hosts such
+#             as ffmpeg.org. The same `sha256`/`narHash` must match whichever
+#             URL actually serves the file.
+#
 # Exactly one of `sha256` / `narHash` must be supplied.
 {
   pkgs ? import ../../utils/default/pkgs.nix,
@@ -18,6 +23,7 @@
   url,
   sha256 ? null,
   narHash ? null,
+  mirrors ? [ ],
 }:
 if (sha256 == null) == (narHash == null) then
   throw "fetch-tarball: exactly one of `sha256` or `narHash` must be set for ${name}"
@@ -25,14 +31,17 @@ else if narHash != null then
   # Extracts the tarball and strips the single top-level directory, matching
   # the `--strip-components=1` behaviour of the legacy branch below.
   pkgs.fetchzip {
-    inherit name url;
+    inherit name;
+    urls = [ url ] ++ mirrors;
     hash = narHash;
     stripRoot = true;
   }
 else
   let
-    tarball = builtins.fetchurl {
-      inherit url sha256;
+    tarball = pkgs.fetchurl {
+      inherit name;
+      urls = [ url ] ++ mirrors;
+      sha256 = sha256;
     };
   in
   pkgs.runCommand name { } ''

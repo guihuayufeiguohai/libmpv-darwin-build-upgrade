@@ -52,9 +52,17 @@ jobs:
       - name: Xcode path
         id: xcode_path
         run: |
-          XCODE_PATH=$(realpath /Applications/Xcode_16.1.0.app)
-          ${XCODE_PATH}/Contents/Developer/usr/bin/xcodebuild -version
-          echo "xcode_path=${XCODE_PATH}" >> $GITHUB_OUTPUT
+          # Resolve the active Xcode .app path from the selected developer dir
+          # (robust against the exact app-bundle name on the runner).
+          DEV_DIR=$(xcode-select -p)
+          XCODE_PATH=$(dirname "$(dirname "$DEV_DIR")")
+          echo "Resolved Xcode: $XCODE_PATH"
+          "${XCODE_PATH}/Contents/Developer/usr/bin/xcodebuild" -version
+          echo "xcode_path=${XCODE_PATH}" >> "$GITHUB_OUTPUT"
+          # The nix xcode overlay reads the path from this file (not the env
+          # var); without it the build falls back to requiring a pre-registered
+          # Xcode.app blob in the Nix store, which CI cannot provide.
+          printf '%s\n' "$XCODE_PATH" > .nix/config/xcode.path
 
       - name: Build vulkan bundle
         env:

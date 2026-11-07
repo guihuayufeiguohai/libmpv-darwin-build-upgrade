@@ -39,6 +39,12 @@
   ffmpeg = {
     version = "7.0.2";
     url = "https://ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz";
+    # Mirrors tried (in order) if ffmpeg.org is unreachable/flaky in CI.
+    # Each serves the identical tarball, so the same sha256 applies.
+    mirrors = [
+      "https://www.mirrorservice.org/sites/ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz"
+      "https://mirror.clarkson.edu/ffmpeg/releases/ffmpeg-7.0.2.tar.xz"
+    ];
     sha256 = "8646515b638a3ad303e23af6a3587734447cb8fc0a0c064ecdb8e95c4fd8b389";
   };
   fftools-ffi = {
