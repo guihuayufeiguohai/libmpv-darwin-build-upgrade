@@ -31,29 +31,38 @@ pkgs.stdenvNoCC.mkDerivation {
 
   buildInputs = [ mpvVulkan ] ++ pkgs.lib.optional includeMoltenvk moltenvk;
 
-  buildPhase = ''
-    mkdir -p $out/lib $out/include
-    # libmpv (self-contained: libplacebo + glslang statically linked)
-    cp -a ${mpvVulkan}/lib/libmpv.dylib $out/lib/ 2>/dev/null || true
-    cp -a ${mpvVulkan}/lib/libmpv.a $out/lib/ 2>/dev/null || true
-    [ -d ${mpvVulkan}/include ] && cp -a ${mpvVulkan}/include/mpv $out/include/ 2>/dev/null || true
-
-    if [ -n "${if includeMoltenvk then "1" else ""}" ]; then
-      mkdir -p $out/moltenvk
-      cp -a ${moltenvk}/. $out/moltenvk/
-      # expose Vulkan headers at the bundle root too, for the host app's SDK path
-      mkdir -p $out/include/vulkan
-      cp -a ${moltenvk}/include/vulkan/. $out/include/vulkan/ 2>/dev/null || true
-    else
-      cat > $out/README.moltenvk.macos.md <<'EOF'
-    This macOS bundle does NOT yet include MoltenVK (only the iOS MoltenVK
-    prebuilt is wired up). Download MoltenVK-macos.tar from
-    https://github.com/KhronosGroup/MoltenVK/releases/tag/v1.4.2 and drop
-    MoltenVK/dynamic/MoltenVK.xcframework + MoltenVK/include into this
-    directory before embedding in your app.
-    EOF
-    fi
-  '';
+  # NOTE: Nix interpolates every `${...}` in this string *before* bash runs it,
+  # so `${moltenvk}` (null for macOS) must be gated at the Nix level. Doing it
+  # with a bash `if` still forces Nix to coerce the null -> "cannot coerce null
+  # to a string". Hence the string concatenation below.
+  buildPhase =
+    ''
+      mkdir -p $out/lib $out/include
+      # libmpv (self-contained: libplacebo + glslang statically linked)
+      cp -a ${mpvVulkan}/lib/libmpv.dylib $out/lib/ 2>/dev/null || true
+      cp -a ${mpvVulkan}/lib/libmpv.a $out/lib/ 2>/dev/null || true
+      [ -d ${mpvVulkan}/include ] && cp -a ${mpvVulkan}/include/mpv $out/include/ 2>/dev/null || true
+    ''
+    + (
+      if includeMoltenvk then
+        ''
+          mkdir -p $out/moltenvk
+          cp -a ${moltenvk}/. $out/moltenvk/
+          # expose Vulkan headers at the bundle root too, for the host app's SDK path
+          mkdir -p $out/include/vulkan
+          cp -a ${moltenvk}/include/vulkan/. $out/include/vulkan/ 2>/dev/null || true
+        ''
+      else
+        ''
+          cat > $out/README.moltenvk.macos.md <<'EOF'
+          This macOS bundle does NOT yet include MoltenVK (only the iOS MoltenVK
+          prebuilt is wired up). Download MoltenVK-macos.tar from
+          https://github.com/KhronosGroup/MoltenVK/releases/tag/v1.4.2 and drop
+          MoltenVK/dynamic/MoltenVK.xcframework + MoltenVK/include into this
+          directory before embedding in your app.
+          EOF
+        ''
+    );
 
   installPhase = ''
     cat > $out/README.md <<EOF

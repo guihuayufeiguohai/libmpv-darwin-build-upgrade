@@ -1,0 +1,4 @@
+
+# CI debug logs (downloaded via API, never commit)
+ci_logs_new/
+ci_logs/

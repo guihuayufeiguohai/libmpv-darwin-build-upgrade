@@ -64,6 +64,23 @@ jobs:
           # Xcode.app blob in the Nix store, which CI cannot provide.
           printf '%s\n' "$XCODE_PATH" > .nix/config/xcode.path
 
+      - name: Diagnose Xcode SDKs
+        env:
+          XCODE_PATH: ${{ steps.xcode_path.outputs.xcode_path }}
+        run: |
+          set +e
+          echo "== xcode-select -p =="; xcode-select -p
+          echo "== /Applications Xcode bundles =="; ls -1 /Applications | grep -i '^Xcode' || true
+          echo "== realpath(selected) =="; realpath "$XCODE_PATH"
+          echo "== Platforms =="; ls -1 "$XCODE_PATH/Contents/Developer/Platforms" 2>&1
+          echo "== iPhoneOS SDKs =="; ls -1 "$XCODE_PATH/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs" 2>&1
+          echo "== MacOSX SDKs =="; ls -1 "$XCODE_PATH/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs" 2>&1
+          echo "== toolchain clang =="; ls -l "$XCODE_PATH/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" 2>&1
+          echo "== xcrun iphoneos sdk-path =="; xcrun --sdk iphoneos --show-sdk-path 2>&1
+          echo "== xcrun macosx sdk-path =="; xcrun --sdk macosx --show-sdk-path 2>&1
+          echo "== xcodebuild -showsdks =="; xcodebuild -showsdks 2>&1
+          echo "== nix sandbox conf =="; nix config show 2>/dev/null | grep -iE 'sandbox' || true
+
       - name: Build vulkan bundle
         env:
           XCODE_PATH: ${{ steps.xcode_path.outputs.xcode_path }}
