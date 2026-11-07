@@ -23,6 +23,30 @@ let
   # path, which silently kills features['vulkan'] -> 'Feature videotoolbox-pl
   # cannot be enabled'. Bake the -I straight into the cross file's built-in
   # options so the probe cannot depend on pkg-config cflags or on env CPATH.
+  #
+  # CoreVideo hides EVERY Metal type unless the deployment target is at least
+  # 10.11 (CoreVideo.framework/Headers/CVBase.h):
+  #
+  #   #if COREVIDEO_SUPPORTS_IOSURFACE && (TARGET_OS_IPHONE ||
+  #           (MAC_OS_X_VERSION_MIN_REQUIRED >= 101100)) && !TARGET_OS_WATCH
+  #       #define COREVIDEO_SUPPORTS_METAL COREVIDEO_TRUE
+  #   #else
+  #       #define COREVIDEO_SUPPORTS_METAL COREVIDEO_FALSE
+  #   #endif
+  #
+  # The stock cross file pins -mmacosx-version-min=10.9, so
+  # COREVIDEO_SUPPORTS_METAL evaluates to FALSE, CVMetalTextureCache.h is never
+  # pulled in, and hwdec_vt_pl.m dies with
+  #   hwdec_vt.h:53:5: error: unknown type name 'CVMetalTextureCacheRef'
+  #   hwdec_vt.h:54:5: error: unknown type name 'CVMetalTextureRef'
+  #
+  # 11.0 is the real floor for arm64 macOS, so nothing is lost. iOS is
+  # unaffected: there TARGET_OS_IPHONE short-circuits the same check. Only the
+  # Vulkan cross file is rewritten - the OpenGL build keeps its 10.9 floor.
+  macosDeploymentTargetFix = pkgs.lib.optionalString (os == oses.macos) ''
+    sed -i 's/-mmacosx-version-min=10\.9/-mmacosx-version-min=11.0/g' $out
+    test "$(grep -c -- '-mmacosx-version-min=11.0' $out)" = "1"
+  '';
   crossFileVulkan = pkgs.runCommand "mk-cross-file-${os}-${arch}-vulkan.ini" { } ''
     # NOTE: '#' is the s/// delimiter on purpose - the pattern uses '|' for
     # alternation, so '|' cannot also be the delimiter.
@@ -34,6 +58,8 @@ let
       cat $out >&2
       exit 1
     fi
+
+    ${macosDeploymentTargetFix}
   '';
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
