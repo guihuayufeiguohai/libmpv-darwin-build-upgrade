@@ -30,7 +30,7 @@ in
 pkgs.stdenvNoCC.mkDerivation {
   name = "glslang-${os}-${arch}-${packageLock.version}";
   pname = "glslang";
-  inherit version packageLock.version;
+  version = packageLock.version;
   inherit src;
 
   nativeBuildInputs = [

@@ -28,7 +28,7 @@ in
 pkgs.stdenvNoCC.mkDerivation {
   name = "vulkan-headers-${os}-${arch}-${packageLock.version}";
   pname = "vulkan-headers";
-  inherit version packageLock.version;
+  version = packageLock.version;
   inherit src;
 
   nativeBuildInputs = [
