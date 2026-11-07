@@ -1,4 +1,21 @@
 {
+  # MoltenVK 1.4.2 iOS runtime (prebuilt). Hash verified locally against the
+  # official GitHub release asset MoltenVK-ios.tar (34,535,424 bytes).
+  # Only the ios-arm64 slice is present: there is NO simulator slice in this
+  # archive, so Vulkan can only be enabled for real iOS arm64 devices.
+  moltenvk = {
+    version = "1.4.2";
+    url = "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar";
+    sha256 = "b5d947b1660e6e9fed40b9cd2387e160aaab9e80b775c0cef7e14059405178c1";
+  };
+  # glslang is required by libplacebo's Vulkan backend to compile generated
+  # GLSL into SPIR-V at runtime. Pinned for stage 2; hash from mpv_kit's
+  # native/build/deps.sh (same upstream tarball).
+  glslang = {
+    version = "16.6.0";
+    url = "https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz";
+    sha256 = "9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2";
+  };
   dav1d = {
     version = "1.2.1";
     url = "https://code.videolan.org/videolan/dav1d/-/archive/1.2.1/dav1d-1.2.1.tar.bz2";

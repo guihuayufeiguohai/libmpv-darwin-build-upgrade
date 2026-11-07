@@ -33,6 +33,21 @@ All three applied FFmpeg patches are byte-identical to the copies the
 The superseded and obsolete files are kept for reference only. They are not
 referenced by any Nix expression and are not applied to anything.
 
+## Vulkan / MoltenVK patches (stage 1 of route C, branch `vulkan-ios`)
+
+The four `mpv-041-vulkan-000{1,2,4,5}-*.patch` files are copies of mpv_kit's
+upstream patches against mpv 0.41.0. They add `MPV_RENDER_API_TYPE_VULKAN`,
+the gpu-next Vulkan render backend, FFmpeg hwdec device extensions and a
+`get_info` report. They are **not applied by `mk-pkg-mpv/default.nix` yet** —
+see `C-ROUTE-IOS.md` stage 2. Verified locally: `0001 → 0002 → 0004 → 0005`
+apply cleanly and in order on a pristine 0.41.0 tree that already has
+`mpv-041-audiounit.patch` and `mpv-041-bluray-http.patch`.
+
+`mpv-041-libmpv-renderer-selection.patch` (the OpenGL/gpu-next "route A"
+patch used on `main`) **conflicts** with 0004 — both rewrite
+`vo_gpu_next.c` and `vo_libmpv.c`. On the Vulkan branch, apply the four
+Vulkan patches instead and leave the route A patch out.
+
 ## Verification method
 
 Every "applies" claim above was produced by running

@@ -1,0 +1,62 @@
+name: vulkan-ios-stage1
+
+# Stage 1 of the Vulkan/MoltenVK (route C) port: build and publish the iOS
+# Vulkan dependency layer. This job is deliberately independent of the main
+# ci.yaml, so a failure here cannot break the existing libmpv release build.
+on:
+  push:
+    branches:
+      - vulkan-ios
+  workflow_dispatch:
+
+jobs:
+  moltenvk:
+    name: MoltenVK iOS arm64 dependency
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Platform info
+        run: |
+          /usr/bin/sw_vers
+          uname -m
+
+      - uses: actions/checkout@v6
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          extra-conf: |
+            sandbox = true
+            sandbox-fallback = false
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: false
+
+      - name: Build MoltenVK dependency package
+        run: nix build -L .#mk-pkg-moltenvk-ios-arm64
+
+      - name: Inspect dependency layout
+        run: |
+          echo "--- files ---"
+          find result -maxdepth 3 -type f | sort | head -40
+          echo "--- vulkan.pc ---"
+          cat result/lib/pkgconfig/vulkan.pc
+          echo "--- header version ---"
+          grep -m1 'VK_HEADER_VERSION ' result/include/vulkan/vulkan_core.h
+          echo "--- static lib ---"
+          ls -lh result/lib/libMoltenVK.a
+
+      - name: Package for download
+        run: |
+          mkdir -p dist
+          cp -rL result dist/moltenvk-ios-arm64
+          tar -czf dist/moltenvk-ios-arm64.tar.gz -C dist moltenvk-ios-arm64
+          shasum -a 256 dist/moltenvk-ios-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: moltenvk-ios-arm64
+          path: dist/moltenvk-ios-arm64.tar.gz
+          if-no-files-found: error
