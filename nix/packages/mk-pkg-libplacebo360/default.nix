@@ -15,6 +15,11 @@ let
   };
   nativeFile = callPackage ../../utils/native-file/default.nix { };
   crossFile = callPackage ../../utils/cross-file/default.nix { };
+  # meson's darwin_get_object_archs() shells out to a bare `lipo` from $PATH
+  # (it does NOT use the cross-file's [binaries] lipo entry) when it runs
+  # find_library() for glslang/SPIRV. Without this, `meson setup` dies with
+  # FileNotFoundError: 'lipo'. Same fix mk-pkg-freetype / mk-pkg-mpv use.
+  xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
 
   pname = import ../../utils/name/package.nix name;
@@ -38,7 +43,7 @@ let
     };
     vulkan-headers = callPackage ../../utils/fetch-tarball/default.nix {
       name = "libplacebo-3rdparty-Vulkan-Headers-source";
-      inherit (lock.libplacebo-3rdparty-vulkan-headers) url sha256;
+      inherit (lock.vulkan-sdk-headers) url sha256;
     };
   };
 
@@ -90,6 +95,7 @@ pkgs.stdenvNoCC.mkDerivation {
     pkgs.ninja
     pkgs.pkg-config
     pkgs.python3
+    xctoolchainLipo
   ];
   configurePhase = ''
     # libplacebo's Vulkan backend needs the Vulkan headers on the include path
@@ -97,7 +103,20 @@ pkgs.stdenvNoCC.mkDerivation {
     # not clobber the -arch/-isysroot flags the cross file already sets.
     export CFLAGS="-I${vulkanSdk}/include $CFLAGS"
     export CXXFLAGS="-I${vulkanSdk}/include $CXXFLAGS"
+    # glslang detection is `cc.has_header('glslang/build_info.h')` with NO
+    # `dependencies:` argument, so the SDK include dir has to be on the
+    # compiler's own default search path. CPATH is read by clang itself, which
+    # makes it independent of whether meson merges env CFLAGS into the cross
+    # file's c_args. Missing it only WARNS, and yields a Vulkan backend that
+    # cannot compile a single shader at runtime.
+    export CPATH="${vulkanSdk}/include:$CPATH"
 
+    # -Dvk-proc-addr=enabled: libplacebo then declares (and uses) the loader's
+    # vkGetInstanceProcAddr symbol. The SDK's vulkan.pc deliberately carries an
+    # EMPTY Libs, so nothing is linked here; libmpv is a STATIC archive
+    # (mpv sets default_library=static), so the symbol stays undefined until the
+    # host app links MoltenVK - which it must anyway to create the VkInstance/
+    # VkDevice it hands to MPV_RENDER_PARAM_VULKAN_INIT_PARAMS.
     meson setup build $src \
       --native-file ${nativeFile} \
       --cross-file ${crossFile} \
@@ -127,6 +146,21 @@ pkgs.stdenvNoCC.mkDerivation {
   '';
   installPhase = ''
     meson install -C build
+
+    # Hard-fail instead of shipping a crippled libplacebo. libplacebo only
+    # WARNS when it ends up with Vulkan but no GLSL compiler, and mpv then
+    # either drops its Vulkan backend entirely or builds one that cannot
+    # compile shaders at runtime. These three flags are exactly what mpv reads
+    # back via libplacebo.get_variable().
+    echo "--- libplacebo.pc feature variables ---"
+    grep '^pl_has_' $out/lib/pkgconfig/libplacebo.pc || true
+    for var in pl_has_vulkan pl_has_vk_proc_addr pl_has_glslang; do
+      if ! grep -qE "^$var *= *1$" $out/lib/pkgconfig/libplacebo.pc; then
+        echo "error: libplacebo was built without $var" >&2
+        echo "       see build/meson-logs/meson-log.txt" >&2
+        exit 1
+      fi
+    done
 
     mkdir -p $out/share/libplacebo
     cp build/meson-logs/meson-log.txt $out/share/libplacebo/ || true

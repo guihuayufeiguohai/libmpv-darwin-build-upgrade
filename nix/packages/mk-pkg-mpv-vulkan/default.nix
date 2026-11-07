@@ -83,11 +83,25 @@ pkgs.stdenvNoCC.mkDerivation {
   inherit nativeBuildInputs;
   # libbluray is disabled in the Vulkan build (-Dlibbluray=disabled above), so
   # it is intentionally omitted from buildInputs here.
+  # vulkanSdk is a buildInput so nixpkgs' pkg-config wrapper puts its
+  # lib/pkgconfig on PKG_CONFIG_PATH: mpv's meson resolves Vulkan exclusively
+  # through `dependency('vulkan', version: '>= 1.3.238')`, and without a
+  # vulkan.pc that lookup fails silently and Vulkan is dropped from the build.
   buildInputs =
-    [ ffmpeg libplacebo libass uchardet ];
+    [ ffmpeg libplacebo libass uchardet vulkanSdk ];
   configurePhase = ''
+    set -o pipefail
+
     export CFLAGS="-I${vulkanSdk}/include $CFLAGS"
     export CXXFLAGS="-I${vulkanSdk}/include $CXXFLAGS"
+    # Same reason as libplacebo: make the SDK include dir reachable through the
+    # compiler's own search path (CPATH), independent of meson's handling of
+    # env CFLAGS in a cross build.
+    export CPATH="${vulkanSdk}/include:$CPATH"
+    # Belt and braces: the pkg-config wrapper already adds the buildInputs'
+    # pkgconfig dirs, but spell the Vulkan SDK out so the lookup cannot depend
+    # on setup-hook ordering.
+    export PKG_CONFIG_PATH="${vulkanSdk}/lib/pkgconfig:$PKG_CONFIG_PATH"
 
     DISABLE_ALL_OPTIONS=(
       -Dgpl=false -Dcplayer=false -Dlibmpv=false -Dbuild-date=false
@@ -117,13 +131,15 @@ pkgs.stdenvNoCC.mkDerivation {
       -Dspirv-cross=disabled -Dplain-gl=disabled -Dvdpau=disabled
       -Dvdpau-gl-x11=disabled -Dvaapi=disabled -Dvaapi-drm=disabled
       -Dvaapi-wayland=disabled -Dvaapi-x11=disabled
-      -Dvulkan=enabled `# Vulkan context support (the whole point of this build)`
+      # Vulkan context support (the whole point of this build)
+      -Dvulkan=enabled
       -Dwayland=disabled -Dx11=disabled -Dxv=disabled
 
       -Dandroid-media-ndk=disabled -Dcuda-hwaccel=disabled
       -Dcuda-interop=disabled -Dd3d-hwaccel=disabled -Dd3d9-hwaccel=disabled
       -Dgl-dxinterop-d3d9=disabled -Dios-gl=disabled
-      -Dvideotoolbox-gl=disabled -Dvideotoolbox-pl=enabled `# hwdec via libplacebo`
+      # hwdec via libplacebo (VideoToolbox -> Vulkan frames)
+      -Dvideotoolbox-gl=disabled -Dvideotoolbox-pl=enabled
 
       -Dmacos-10-15-4-features=disabled -Dmacos-11-features=disabled
       -Dmacos-11-3-features=disabled -Dmacos-12-features=disabled
@@ -157,6 +173,23 @@ pkgs.stdenvNoCC.mkDerivation {
       --prefix=$out \
       "''${OPTIONS[@]}" |
       tee configure.log
+
+    # ---- post-configure assertions --------------------------------------
+    # mpv only emits "#define HAVE_<FEATURE> 1" when EVERY prerequisite was
+    # found, and it degrades silently: a missing vulkan.pc, or a libplacebo
+    # configured without Vulkan (pl_has_vulkan=0 in libplacebo.pc), produces a
+    # perfectly "successful" build whose libmpv has no Vulkan render API.
+    # Never ship such an artifact - fail here with a readable message instead.
+    echo "--- mpv feature summary (vulkan route) ---"
+    grep -E '^#define HAVE_(VULKAN|LIBPLACEBO|VIDEOTOOLBOX_PL|GL|EGL|IOS_GL|COCOA) ' \
+      build/config.h || true
+    for feature in VULKAN LIBPLACEBO VIDEOTOOLBOX_PL; do
+      if ! grep -qE "^#define HAVE_$feature +1" build/config.h; then
+        echo "error: mpv was configured without $feature" >&2
+        echo "       see build/meson-logs/meson-log.txt (not kept on failure)" >&2
+        exit 1
+      fi
+    done
   '';
   buildPhase = ''
     meson compile -vC build

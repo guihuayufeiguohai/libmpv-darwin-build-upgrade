@@ -16,8 +16,9 @@ let
   cxx = "${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++";
 
   lock = import ../../../packages.lock.nix;
-  # Reuse the Vulkan-Headers source already pinned for libplacebo's 3rdparty.
-  packageLock = lock.libplacebo-3rdparty-vulkan-headers;
+  # 1.4.363.0: libplacebo 7.360.1 requires VK_VERSION_1_4 in vulkan_core.h, so
+  # the Vulkan route cannot use the 1.3.243 headers the OpenGL build pins.
+  packageLock = lock.vulkan-sdk-headers;
 
   src = pkgs.callPackage ../../utils/fetch-tarball/default.nix {
     name = "vulkan-headers-source-${packageLock.version}";

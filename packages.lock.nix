@@ -110,6 +110,20 @@
     url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.243.tar.gz";
     sha256 = "76c57490740369a26d68dd26d308e2faa2e0fc5d255498aa48ee389534fc5a48";
   };
+  # Vulkan-Headers for the Vulkan route ONLY (kept separate from the 1.3.243
+  # entry above so the baseline OpenGL build stays byte-for-byte unchanged).
+  # libplacebo 7.360.1 hard-requires VK_VERSION_1_4 in vulkan_core.h:
+  #   src/vulkan/meson.build:
+  #     cc.has_header_symbol('vulkan/vulkan_core.h', 'VK_VERSION_1_4', ...)
+  # With 1.3.243 headers that check fails, libplacebo is then configured
+  # WITHOUT vulkan (silently: components['vulkan'] = false -> pl_has_vulkan=0),
+  # and mpv aborts with 'libplacebo compiled without vulkan support!'.
+  # Same tag + hash as mpv_kit's native/build/deps.sh (VK_SDK=1.4.363.0).
+  vulkan-sdk-headers = {
+    version = "1.4.363.0";
+    url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz";
+    sha256 = "4a078be12bef21cfebc09d878b77a63cff9d68f899254a0b00d0e37ef73e7f7e";
+  };
   libpng = {
     version = "1.6.40";
     url = "https://github.com/pnggroup/libpng/archive/v1.6.40.tar.gz";
