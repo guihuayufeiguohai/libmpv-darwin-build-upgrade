@@ -47,6 +47,22 @@
     ];
     sha256 = "8646515b638a3ad303e23af6a3587734447cb8fc0a0c064ecdb8e95c4fd8b389";
   };
+  # FFmpeg 8.1.3 for the Vulkan route ONLY (mk-pkg-ffmpeg8). Kept separate so
+  # the OpenGL build stays byte-for-byte unchanged. Same tarball + hash as
+  # mpv_kit's native/build/ffmpeg.sh (FFMPEG_SHA256), which is verified by its
+  # Windows/Linux/macOS release workflow.
+  #
+  # libavutil 60.x (vs 59.8.100 in 7.0.2) unlocks the L1 per-frame dynamic
+  # Dolby Vision luminance metadata in libplacebo's pl_map_avdovi_metadata().
+  ffmpeg8 = {
+    version = "8.1.3";
+    url = "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz";
+    mirrors = [
+      "https://www.mirrorservice.org/sites/ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz"
+      "https://mirror.clarkson.edu/ffmpeg/releases/ffmpeg-8.1.3.tar.xz"
+    ];
+    sha256 = "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3";
+  };
   fftools-ffi = {
     version = "9b0d4da0";
     url = "https://github.com/moffatman/fftools-ffi/archive/9b0d4da026d9c830702ec043c1f1f98d407025af.tar.gz";

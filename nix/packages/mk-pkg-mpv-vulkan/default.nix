@@ -71,11 +71,25 @@ let
   vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
 
   # These dependency packages are wired exactly like the baseline OpenGL
-  # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded, because
-  # libass/uchardet/libbluray/ffmpeg do NOT accept a `variant` argument.
-  # Forwarding `variant` here is what broke the stage-2 eval with
+  # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded to
+  # libass/uchardet/libbluray, because those do NOT accept a `variant`
+  # argument. Forwarding it is what broke the stage-2 eval with
   # "function called with unexpected argument 'variant'".
-  ffmpeg = callPackage ../mk-pkg-ffmpeg/default.nix { };
+  #
+  # FFmpeg is the exception and needs EXPLICIT variant/flavor:
+  # this callPackage scope only carries pkgs/os/arch, while the OpenGL
+  # mk-pkg-mpv scope also carries variant/flavor. Without explicit values
+  # mk-pkg-ffmpeg8 falls back to utils/default/variant.nix = "audio", and the
+  # audio flavour has NO h264/hevc decoders (meson.build's
+  # audio_default_options, plus --disable-decoder=h264 in audio_full_options).
+  # That would produce a libmpv which cannot decode video at all.
+  #
+  # It also moves the Vulkan route to FFmpeg 8.1.3 (isolated mk-pkg-ffmpeg8;
+  # the shared 7.0.2 package stays for the OpenGL build).
+  ffmpeg = callPackage ../mk-pkg-ffmpeg8/default.nix {
+    variant = "video";
+    flavor = "default";
+  };
   libplacebo = callPackage ../mk-pkg-libplacebo360/default.nix { };
   uchardet = callPackage ../mk-pkg-uchardet/default.nix { };
   libass = callPackage ../mk-pkg-libass/default.nix { };
