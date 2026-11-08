@@ -11,6 +11,14 @@ let
   vulkanHeaders = pkgs.callPackage ../mk-pkg-vulkan-headers/default.nix {
     inherit os arch;
   };
+  # Vulkan implementation for Apple platforms. Linking it here (via vulkan.pc
+  # below) is what makes libmpv carry a real vkGetInstanceProcAddr instead of
+  # leaving it as an undefined symbol resolved by -undefined dynamic_lookup,
+  # which is unreliable on iOS. moltenvk does not depend on this package, so
+  # there is no cycle.
+  moltenvk = pkgs.callPackage ../mk-pkg-moltenvk/default.nix {
+    inherit os arch;
+  };
   lock = import ../../../packages.lock.nix;
   # Must match the bundled Vulkan-Headers exactly. Two independent consumers
   # compare this version number:
@@ -62,18 +70,22 @@ pkgs.stdenvNoCC.mkDerivation {
     #   libplacebo: vulkan_loader = dependency('vulkan', required: false)
     #               cc.has_header_symbol('vulkan/vulkan_core.h', 'VK_VERSION_1_4',
     #                                    dependencies: vulkan_headers)
-    # Headers only: on Apple the loader/ICD is MoltenVK, which the host app
-    # links; mpv/libplacebo reach the API through vkGetInstanceProcAddr at
-    # runtime (libplacebo is built with -Dvk-proc-addr=enabled), so an empty
-    # Libs is deliberate and keeps libmpv free of a hard libvulkan dependency.
+    # Libs carries MoltenVK: on Apple it is the only Vulkan implementation, and
+    # libmpv must resolve vkGetInstanceProcAddr itself. Before this, Libs was
+    # empty and the symbol stayed undefined, relying on
+    # -undefined dynamic_lookup to be satisfied by whatever the host process
+    # happened to export -- workable on macOS, unreliable on iOS.
+    # libplacebo is built with -Dvk-proc-addr=enabled so it only *declares*
+    # vkGetInstanceProcAddr; the static link happens once, when libmpv is
+    # linked, so MoltenVK is not duplicated into libplacebo.a.
     mkdir -p $out/lib/pkgconfig
     printf '%s\n' \
       "includedir=$out/include" \
       "Name: vulkan" \
-      "Description: Vulkan headers (loader/ICD provided by MoltenVK in the host app)" \
+      "Description: Vulkan headers + MoltenVK static library" \
       "Version: ${vulkanHeadersVersion}" \
       "Cflags: -I$out/include" \
-      "Libs:" \
+      "Libs: -L${moltenvk}/lib -lMoltenVK" \
       > $out/lib/pkgconfig/vulkan.pc
   '';
 

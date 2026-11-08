@@ -3,10 +3,21 @@
   # official GitHub release asset MoltenVK-ios.tar (34,535,424 bytes).
   # Only the ios-arm64 slice is present: there is NO simulator slice in this
   # archive, so Vulkan can only be enabled for real iOS arm64 devices.
+  # iOS: static + dynamic, ios-arm64 ONLY. There is no
+  # ios-arm64_x86_64-simulator slice in this tarball, so Vulkan is not
+  # available in the simulator (MoltenVK-all.tar would add it).
   moltenvk = {
     version = "1.4.2";
     url = "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar";
     sha256 = "b5d947b1660e6e9fed40b9cd2387e160aaab9e80b775c0cef7e14059405178c1";
+  };
+  # macOS: static + dynamic, one universal macos-arm64_x86_64 slice.
+  # sha256 measured locally on the complete 59,563,008-byte tarball and
+  # identical to mpv_kit's native/build/deps.sh pin.
+  moltenvk-macos = {
+    version = "1.4.2";
+    url = "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar";
+    sha256 = "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e";
   };
   # glslang is required by libplacebo's Vulkan backend to compile generated
   # GLSL into SPIR-V at runtime. Pinned for stage 2; hash from mpv_kit's

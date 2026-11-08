@@ -10,9 +10,11 @@ let
     inherit pkgs os arch;
   };
   mpvVulkan = callPackage ../mk-pkg-mpv-vulkan/default.nix { inherit os arch; };
-  includeMoltenvk = os == "ios";
-  # Only construct the MoltenVK derivation for iOS (the macOS prebuilt is not
-  # wired up yet); Nix would otherwise try to evaluate it for macOS too.
+  # MoltenVK is the only Vulkan implementation on Apple platforms, so both
+  # bundles carry it: iOS gets static + dynamic, macOS gets the universal
+  # macos-arm64_x86_64 static library (MoltenVK-macos.tar has no dynamic
+  # framework).
+  includeMoltenvk = os == "ios" || os == "macos";
   moltenvk = if includeMoltenvk
     then callPackage ../mk-pkg-moltenvk/default.nix { inherit os arch; }
     else null;
@@ -21,7 +23,7 @@ in
 # Aggregates the Vulkan libmpv stack into a drop-in directory for the host app:
 #   lib/libmpv.dylib   (libplacebo + glslang are statically linked in)
 #   include/mpv/*      (mpv public headers)
-#   moltenvk/*         (MoltenVK runtime + Vulkan headers)  -- iOS only for now
+#   moltenvk/*         (MoltenVK runtime + Vulkan headers)  -- iOS and macOS
 #   README.md          (integration steps for media_kit's new TextureHW)
 pkgs.stdenvNoCC.mkDerivation {
   name = "vulkan-bundle-${os}-${arch}";
@@ -94,15 +96,17 @@ and glslang (16.6.0) are statically linked into \`lib/libmpv.dylib\`.
 
 ## What you need to link in your app
 - \`lib/libmpv.dylib\`
-- MoltenVK (Vulkan loader/ICD for Apple): \`moltenvk/\` on iOS, or drop in
-  MoltenVK.framework on macOS.
+- MoltenVK (the Vulkan implementation on Apple): \`moltenvk/\` in this bundle.
+  iOS ships \`lib/libMoltenVK.a\` plus \`MoltenVK.xcframework\`; macOS ships the
+  universal \`macos-arm64_x86_64\` static library.
 - System frameworks (added by the host linker):
   - iOS: Metal, CoreVideo, IOSurface, Foundation, AudioToolbox
   - macOS: Metal, CoreVideo, IOSurface, Foundation, CoreAudio
 
 ## Runtime
-At launch the process must export the Vulkan API. With MoltenVK linked, mpv's
-\`vkGetInstanceProcAddr\` resolves against it. No separate vulkan-loader is used.
+libmpv already links MoltenVK statically, so \`vkGetInstanceProcAddr\` is
+resolved inside \`libmpv.dylib\`; the app does not have to export it. No
+separate vulkan-loader is used.
 
 ## media_kit side
 The Flutter plugin's \`TextureHW\` must be rewritten to use
