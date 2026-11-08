@@ -95,11 +95,23 @@ jobs:
           # diagnostics and the compiler command line.
           nix build -L ".#mk-out-vulkan-${{ matrix.os }}-${{ matrix.arch }}" \
             --out-link "result-${{ matrix.os }}-${{ matrix.arch }}"
+          # media-kit vendors *.xcframework, so package Mpv + Uchardet for it.
+          nix build -L ".#mk-out-vulkan-xcframework-${{ matrix.os }}-${{ matrix.arch }}" \
+            --out-link "result-xcf-${{ matrix.os }}-${{ matrix.arch }}"
 
       - name: Package
         run: |
+          stage="stage-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "$stage/xcframework"
+          cp -R "result-${{ matrix.os }}-${{ matrix.arch }}/." "$stage/"
+          cp -R "result-xcf-${{ matrix.os }}-${{ matrix.arch }}/." "$stage/xcframework/"
+          # Sanity: the app-facing SDK and the frameworks must both be present.
+          test -f "$stage/lib/libmpv.2.dylib"
+          test -f "$stage/include/mpv/render_vk.h"
+          test -d "$stage/xcframework/Mpv.xcframework"
+          test -d "$stage/xcframework/Uchardet.xcframework"
           tar -czf "vulkan-bundle-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
-            -C "result-${{ matrix.os }}-${{ matrix.arch }}" .
+            -C "$stage" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
