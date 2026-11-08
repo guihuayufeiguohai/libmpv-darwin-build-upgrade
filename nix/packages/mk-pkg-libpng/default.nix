@@ -7,7 +7,6 @@
 let
   name = "libpng";
   packageLock = (import ../../../packages.lock.nix).${name};
-  packagePatchLock = (import ../../../packages.lock.nix).libpngPatch;
   inherit (packageLock) version;
 
   callPackage = pkgs.lib.callPackageWith { inherit pkgs os arch; };
@@ -19,43 +18,41 @@ let
     name = "${pname}-source-${version}";
     inherit (packageLock) url sha256;
   };
-  libpngPatch = builtins.fetchurl {
-    inherit (packagePatchLock) url sha256;
-  };
+  # The upstream libpng 1.6.40 tarball has no meson.build. meson's wrapdb
+  # used to provide it through
+  #   https://wrapdb.mesonbuild.com/v2/libpng_1.6.40-1/get_patch
+  # downloaded with builtins.fetchurl during Nix *evaluation* -- so a 504
+  # from wrapdb killed the whole build before a single file was compiled.
+  # wrapdb's tag libpng_1.6.40-1 contains exactly ONE file in
+  # subprojects/packagefiles/libpng: meson.build (3761 bytes), and that tag's
+  # libpng.wrap declares source_hash == packages.lock.nix's libpng sha256.
+  # Vendoring this single file is byte-equivalent and removes the fragile
+  # external dependency from evaluation altogether.
   patchedSource =
-    pkgs.runCommand "${pname}-patched-source-${version}"
-      {
-        nativeBuildInputs = [
-          pkgs.unzip
-          pkgs.rsync
-        ];
-      }
-      ''
-        cp -r ${src} src
-        export src=$PWD/src
-        chmod -R 777 $src
+    pkgs.runCommand "${pname}-patched-source-${version}" { } ''
+      cp -r ${src} src
+      export src=$PWD/src
+      chmod -R 777 $src
 
-        # extract and patch libpng dependency
-        unzip ${libpngPatch} -d libpng-patch
-        rsync -a libpng-patch/libpng-*/ $src/
+      cp ${./libpng-1.6.40-meson.build} $src/meson.build
 
-        # libpng 1.6.40 does `#include <fp.h>` on Apple targets, but fp.h was
-        # removed from modern macOS SDKs (Xcode 11+), so clang fails with
-        # "fatal error: 'fp.h' file not found". The surrounding logic is
-        #   #if !defined(__MATH_H__) ... #include <fp.h> #else #include <math.h>
-        # i.e. fp.h *replaces* math.h on old Apple compilers. Simply dropping
-        # the include would take the (now empty) #if branch and skip math.h,
-        # leaving modf/floor/pow undeclared. So replace it with <math.h>.
-        # Grep-verify so a future source bump fails loudly.
-        if grep -q 'include <fp.h>' $src/pngpriv.h; then
-          sed -i -E 's@^[[:space:]]*#[[:space:]]*include[[:space:]]*<fp\.h>.*$@#      include <math.h>@' $src/pngpriv.h
-        fi
-        if grep -q 'include <fp.h>' $src/pngpriv.h; then
-          echo "libpng: failed to strip <fp.h> include from pngpriv.h" >&2
-          exit 1
-        fi
+      # libpng 1.6.40 does `#include <fp.h>` on Apple targets, but fp.h was
+      # removed from modern macOS SDKs (Xcode 11+), so clang fails with
+      # "fatal error: 'fp.h' file not found". The surrounding logic is
+      #   #if !defined(__MATH_H__) ... #include <fp.h> #else #include <math.h>
+      # i.e. fp.h *replaces* math.h on old Apple compilers. Simply dropping
+      # the include would take the (now empty) #if branch and skip math.h,
+      # leaving modf/floor/pow undeclared. So replace it with <math.h>.
+      # Grep-verify so a future source bump fails loudly.
+      if grep -q 'include <fp.h>' $src/pngpriv.h; then
+        sed -i -E 's@^[[:space:]]*#[[:space:]]*include[[:space:]]*<fp\.h>.*$@#      include <math.h>@' $src/pngpriv.h
+      fi
+      if grep -q 'include <fp.h>' $src/pngpriv.h; then
+        echo "libpng: failed to strip <fp.h> include from pngpriv.h" >&2
+        exit 1
+      fi
 
-        cp -r $src $out
+      cp -r $src $out
       '';
 in
 

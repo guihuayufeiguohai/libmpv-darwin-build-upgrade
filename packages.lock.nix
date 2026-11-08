@@ -145,6 +145,12 @@
     url = "https://github.com/pnggroup/libpng/archive/v1.6.40.tar.gz";
     sha256 = "62d25af25e636454b005c93cae51ddcd5383c40fa14aa3dae8f6576feb5692c2";
   };
+  # No longer used. mk-pkg-libpng now vendors
+  # nix/packages/mk-pkg-libpng/libpng-1.6.40-meson.build (the sole file in
+  # wrapdb's libpng_1.6.40-1 patch directory) instead of fetching get_patch
+  # with builtins.fetchurl during evaluation -- wrapdb's 504s were killing
+  # the whole Nix eval on the macOS runner. Kept here for reference only;
+  # nothing reads this attribute any more.
   libpngPatch = {
     version = "1.6.40-1";
     url = "https://wrapdb.mesonbuild.com/v2/libpng_1.6.40-1/get_patch";
