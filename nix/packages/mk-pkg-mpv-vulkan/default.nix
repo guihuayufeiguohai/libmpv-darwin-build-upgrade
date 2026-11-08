@@ -136,6 +136,11 @@ let
     # by the OpenGL build (that patch conflicts with 0004).
     patch -p1 <${../../../patches/mpv-041-vulkan-0001-render-backend.patch}
     patch -p1 <${../../../patches/mpv-041-vulkan-0002-hwdec-extensions.patch}
+    # Persistent pl_cache on the imported Vulkan pl_gpu. Without it every
+    # fresh start recompiles all SPIR-V shaders (~0.4 s / a few dropped
+    # frames); with it mpv_kit measured 0 dropped frames on later starts.
+    # Same position as mpv_kit's own 0001->0002->0003->0004->0005 sequence.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0003-shader-cache.patch}
     patch -p1 <${../../../patches/mpv-041-vulkan-0004-gpu-next.patch}
     patch -p1 <${../../../patches/mpv-041-vulkan-0005-get-info.patch}
 
