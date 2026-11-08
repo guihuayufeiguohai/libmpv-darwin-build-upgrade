@@ -72,9 +72,10 @@ let
 
   # These dependency packages are wired exactly like the baseline OpenGL
   # mk-pkg-mpv does (callPackage ... { }): no `variant` is forwarded to
-  # libass/uchardet/libbluray, because those do NOT accept a `variant`
-  # argument. Forwarding it is what broke the stage-2 eval with
+  # libass/uchardet, because those do NOT accept a `variant` argument.
+  # Forwarding it is what broke the stage-2 eval with
   # "function called with unexpected argument 'variant'".
+  # (libbluray and ffmpeg DO accept variant and get it explicitly below.)
   #
   # FFmpeg is the exception and needs EXPLICIT variant/flavor:
   # this callPackage scope only carries pkgs/os/arch, while the OpenGL
@@ -93,6 +94,12 @@ let
   libplacebo = callPackage ../mk-pkg-libplacebo360/default.nix { };
   uchardet = callPackage ../mk-pkg-uchardet/default.nix { };
   libass = callPackage ../mk-pkg-libass/default.nix { };
+  # Blu-ray .iso/.img playback. mpv-041-bluray-http.patch (applied above)
+  # extends bdmv_dir_stream_open() with .iso/.img autodetection, but it is
+  # dead code unless libbluray is actually linked and -Dlibbluray is on.
+  # The OpenGL build enables it for variant=video; the Vulkan build needs it
+  # too, otherwise already-supported Blu-ray images regress.
+  libbluray = callPackage ../mk-pkg-libbluray/default.nix { variant = "video"; };
 
   nativeBuildInputs = [
     pkgs.meson
@@ -167,14 +174,15 @@ pkgs.stdenvNoCC.mkDerivation {
   dontUnpack = true;
   enableParallelBuilding = true;
   inherit nativeBuildInputs;
-  # libbluray is disabled in the Vulkan build (-Dlibbluray=disabled above), so
-  # it is intentionally omitted from buildInputs here.
+  # libbluray ships lib/libbluray.a + lib/pkgconfig/libbluray.pc, so having it
+  # in buildInputs makes meson's dependency('libbluray') resolve via the
+  # pkg-config wrapper. Required for the .iso/.img Blu-ray autodetect patch.
   # vulkanSdk is a buildInput so nixpkgs' pkg-config wrapper puts its
   # lib/pkgconfig on PKG_CONFIG_PATH: mpv's meson resolves Vulkan exclusively
   # through `dependency('vulkan', version: '>= 1.3.238')`, and without a
   # vulkan.pc that lookup fails silently and Vulkan is dropped from the build.
   buildInputs =
-    [ ffmpeg libplacebo libass uchardet vulkanSdk ];
+    [ ffmpeg libplacebo libass uchardet vulkanSdk libbluray ];
   configurePhase = ''
     set -o pipefail
 
@@ -195,7 +203,9 @@ pkgs.stdenvNoCC.mkDerivation {
 
       -Dcdda=disabled -Dcplugins=disabled -Ddvbin=disabled -Ddvdnav=disabled
       -Diconv=disabled -Djavascript=disabled -Dlcms2=disabled
-      -Dlibarchive=disabled -Dlibavdevice=disabled -Dlibbluray=disabled
+      -Dlibarchive=disabled -Dlibavdevice=disabled
+      # Blu-ray .iso/.img support (mpv-041-bluray-http.patch)
+      -Dlibbluray=enabled
       -Dlua=disabled -Dpthread-debug=disabled -Drubberband=disabled
       -Dsdl2-gamepad=disabled -Duchardet=disabled -Duwp=disabled
       -Dvapoursynth=disabled -Dvector=disabled -Dwin32-threads=disabled
