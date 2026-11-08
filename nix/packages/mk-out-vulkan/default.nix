@@ -18,6 +18,13 @@ let
   moltenvk = if includeMoltenvk
     then callPackage ../mk-pkg-moltenvk/default.nix { inherit os arch; }
     else null;
+  # Host-facing Vulkan headers must match the ones libmpv/libplacebo were
+  # COMPILED against. MoltenVK's tarball bundles VK_HEADER_VERSION 357
+  # (Vulkan 1.3.357), while this build compiles against vulkan-sdk-headers
+  # 1.4.363.0. Shipping the older headers would make the host app see
+  # different struct definitions than the binary was built with, so the
+  # bundle takes them from the SDK prefix instead.
+  vulkanSdk = callPackage ../mk-pkg-vulkan-sdk/default.nix { inherit os arch; };
 in
 
 # Aggregates the Vulkan libmpv stack into a drop-in directory for the host app:
@@ -71,9 +78,16 @@ pkgs.stdenvNoCC.mkDerivation {
         ''
           mkdir -p $out/moltenvk
           cp -a ${moltenvk}/. $out/moltenvk/
-          # expose Vulkan headers at the bundle root too, for the host app's SDK path
-          mkdir -p $out/include/vulkan
-          cp -a ${moltenvk}/include/vulkan/. $out/include/vulkan/ 2>/dev/null || true
+          # Host-facing Vulkan headers, taken from the SDK prefix so they are
+          # exactly the 1.4.363.0 ones libmpv was compiled against (moltenvk's
+          # own copy is 1.3.357). vk_video/ is required because 1.4 headers
+          # include it unconditionally.
+          mkdir -p $out/include/vulkan $out/include/vk_video
+          cp -a ${vulkanSdk}/include/vulkan/. $out/include/vulkan/
+          cp -a ${vulkanSdk}/include/vk_video/. $out/include/vk_video/
+          test -f $out/include/vulkan/vulkan_core.h
+          test -f $out/include/vk_video/vulkan_video_codec_h264std.h
+          grep -q 'define VK_HEADER_VERSION 363' $out/include/vulkan/vulkan_core.h
         ''
       else
         ''
