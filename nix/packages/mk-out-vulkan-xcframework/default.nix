@@ -198,10 +198,13 @@ pkgs.stdenvNoCC.mkDerivation {
     test -d $out/Uchardet.xcframework
     test -d $out/Avcodec.xcframework
     test -d $out/Ass.xcframework
-    # No dylib may still point at a Nix store path.
+    # No dylib may still point at a Nix store path. NOTE: the first line of
+    # `otool -L` is the file itself (which lives in /nix/store during the
+    # build), and dependency lines are indented, so only indented matches
+    # count.
     if otool -L $out/Mpv.xcframework/*/Mpv.framework/Mpv \
         $out/Mpv.xcframework/*/Mpv.framework/Versions/A/Mpv 2>/dev/null \
-        | grep -q '/nix/store/'; then
+        | grep -qE '^[[:space:]]+/nix/store/'; then
       echo "error: Mpv still depends on Nix store paths" >&2
       otool -L $out/Mpv.xcframework/*/Mpv.framework/Mpv >&2 || true
       exit 1
