@@ -8,12 +8,12 @@
 # directory names inside Mpv.xcframework. So the output must be real
 # XCFrameworks, not bare dylibs.
 #
-# Two frameworks are produced:
-#   Mpv.xcframework       libmpv (libplacebo + glslang + MoltenVK static)
-#   Uchardet.xcframework  libuchardet, which libmpv links as @rpath dylib
-# Keeping Uchardet separate (instead of statically linking it into libmpv)
-# matches how the OpenGL build ships its dependency closure and avoids the
-# C++ runtime (-lc++) link dance a static uchardet would need.
+# One xcframework is produced per dylib in libmpv's runtime closure:
+#   Mpv       libmpv (libplacebo + glslang + MoltenVK are static inside it)
+#   Avcodec, Avformat, Avutil, Avfilter, Swresample, Swscale, Ass, Uchardet,
+#   Harfbuzz, Fribidi, Freetype, Png, Mbedtls, Dav1d, Xml2
+# That mirrors the OpenGL build (which ships the same closure as frameworks)
+# and avoids the LGPL question that statically linking FFmpeg would raise.
 #
 # The dylib -> framework conversion reuses the OpenGL build's scripts
 # verbatim: they derive "Mpv" from libmpv.2.dylib and "Uchardet" from
@@ -33,7 +33,42 @@ let
   };
 
   mpvVulkan = callPackage ../mk-out-vulkan/default.nix { inherit os arch; };
+
+  # libmpv links these as @rpath dylibs, and their own install names are
+  # absolute /nix/store paths. Without rewriting them (see buildPhase) the
+  # resulting Mpv.framework/Mpv keeps
+  #   /nix/store/...-mk-pkg-ffmpeg-.../lib/libavcodec.62.dylib
+  # style dependencies, which do not exist on a device -> dyld aborts on
+  # launch. libplacebo, glslang and MoltenVK are already statically linked
+  # into libmpv, so they are deliberately absent here.
+  ffmpeg8 = callPackage ../mk-pkg-ffmpeg8/default.nix {
+    variant = "video";
+    flavor = "default";
+  };
+  mbedtls = callPackage ../mk-pkg-mbedtls/default.nix { inherit os arch; };
+  dav1d = callPackage ../mk-pkg-dav1d/default.nix { inherit os arch; };
+  libxml2 = callPackage ../mk-pkg-libxml2/default.nix { inherit os arch; };
   uchardet = callPackage ../mk-pkg-uchardet/default.nix { inherit os arch; };
+  libass = callPackage ../mk-pkg-libass/default.nix { inherit os arch; };
+  harfbuzz = callPackage ../mk-pkg-harfbuzz/default.nix { inherit os arch; };
+  fribidi = callPackage ../mk-pkg-fribidi/default.nix { inherit os arch; };
+  freetype = callPackage ../mk-pkg-freetype/default.nix { inherit os arch; };
+  libpng = callPackage ../mk-pkg-libpng/default.nix { inherit os arch; };
+
+  # Same closure the OpenGL build ships, minus libplacebo (static here).
+  deps = [
+    mpvVulkan
+    ffmpeg8
+    mbedtls
+    dav1d
+    libxml2
+    uchardet
+    libass
+    harfbuzz
+    fribidi
+    freetype
+    libpng
+  ];
 
   xctoolchainInstallNameTool = callPackage ../../utils/xctoolchain/install-name-tool.nix { };
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
@@ -84,10 +119,42 @@ pkgs.stdenvNoCC.mkDerivation {
   buildPhase = ''
     mkdir -p deps build
 
-    # Only the real versioned objects: build-*.sh globs `-type f`, while the
-    # unversioned names inside the bundle are symlinks.
-    cp ${mpvVulkan}/lib/libmpv.2.dylib deps/
-    cp ${uchardet}/lib/libuchardet.dylib deps/
+    # Collect the whole runtime closure. Same normalisation the OpenGL build's
+    # mk-out-libs does, and it is mandatory here: build-*.sh only rewrites
+    # dependencies that already start with @rpath, while the libraries below
+    # record absolute /nix/store/... paths as their install names.
+    for dep in ${pkgs.lib.concatStringsSep " " deps}; do
+      find "$dep/lib" -type f -name '*.dylib' ! -name '*-subset.*.dylib' \
+        -exec cp {} ./deps/ \;
+    done
+
+    # libfoo.100.99.88.dylib -> libfoo.dylib (one framework per library)
+    for file in ./deps/lib*.dylib; do
+      new_path=$(echo "$file" | sed -E 's/^(.*\/lib[^.]*).*$/\1.dylib/')
+      if [ "$file" != "$new_path" ]; then mv "$file" "$new_path"; fi
+    done
+
+    # install name: libfoo.dylib -> @rpath/libfoo.dylib
+    for file in ./deps/lib*.dylib; do
+      install_name_tool -id "@rpath/$(basename "$file")" "$file"
+    done
+
+    # dependency: /nix/store/**/libfoo.99.dylib -> @rpath/libfoo.99.dylib
+    for file in ./deps/lib*.dylib; do
+      deps_list=$(otool -L "$file" | tail -n +3 | sed -n 's|.*\(/nix/store/[^ ]*\).*|\1|p')
+      for dep in $deps_list; do
+        install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$file"
+      done
+    done
+
+    # dependency: @rpath/libfoo.99.dylib -> @rpath/libfoo.dylib
+    for file in ./deps/lib*.dylib; do
+      deps_list=$(otool -L "$file" | tail -n +3 | sed -n 's|.*\(@rpath/[^ ]*\).*|\1|p')
+      for dep in $deps_list; do
+        name=$(echo "$dep" | sed -n 's|@rpath/\(lib[^.]*\).*|\1.dylib|p')
+        install_name_tool -change "$dep" "@rpath/$name" "$file"
+      done
+    done
 
     export DEPS=$PWD/deps
     export OUTPUT_DIR=$PWD/build
@@ -125,8 +192,19 @@ pkgs.stdenvNoCC.mkDerivation {
   installPhase = ''
     mkdir -p $out
     cp -r build/*.xcframework $out/
-    # Fail loudly if the packaging silently produced nothing.
+    # Fail loudly if the packaging silently produced nothing, or if a
+    # dependency escaped the framework conversion.
     test -d $out/Mpv.xcframework
     test -d $out/Uchardet.xcframework
+    test -d $out/Avcodec.xcframework
+    test -d $out/Ass.xcframework
+    # No dylib may still point at a Nix store path.
+    if otool -L $out/Mpv.xcframework/*/Mpv.framework/Mpv \
+        $out/Mpv.xcframework/*/Mpv.framework/Versions/A/Mpv 2>/dev/null \
+        | grep -q '/nix/store/'; then
+      echo "error: Mpv still depends on Nix store paths" >&2
+      otool -L $out/Mpv.xcframework/*/Mpv.framework/Mpv >&2 || true
+      exit 1
+    fi
   '';
 }
