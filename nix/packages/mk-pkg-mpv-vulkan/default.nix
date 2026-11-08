@@ -40,18 +40,31 @@ let
   #   hwdec_vt.h:53:5: error: unknown type name 'CVMetalTextureCacheRef'
   #   hwdec_vt.h:54:5: error: unknown type name 'CVMetalTextureRef'
   #
-  # 11.0 is the real floor for arm64 macOS, so nothing is lost. iOS is
-  # unaffected: there TARGET_OS_IPHONE short-circuits the same check. Only the
-  # Vulkan cross file is rewritten - the OpenGL build keeps its 10.9 floor.
+  # 11.0 is the real floor for arm64 macOS, so nothing is lost.
+  #
+  # iOS needs the same treatment for a different reason: MoltenVK 1.4.2 is
+  # built for iOS 15.0 (its framework Info.plist says MinimumOSVersion 15.0,
+  # and linking it against a 12.0 target emits
+  #   ld: warning: object file (...libMoltenVK.a...) was built for newer
+  #   'iOS' version (15.0) than being linked (12.0)
+  # which turns into a dyld failure on iOS 12-14 devices).
+  #
+  # Only the Vulkan cross file is rewritten: the shared cross-files/*.ini stay
+  # at 12.0 / 10.9 so the OpenGL build keeps supporting older devices.
   #
   # Operates on the build-local cross-file.ini, never on $out: $out lives in
   # the read-only nix store, where `sed -i` cannot create its temp file
   # ("sed: couldn't open temporary file /nix/store/sedXXXX: Operation not
   # permitted").
-  macosDeploymentTargetFix = pkgs.lib.optionalString (os == oses.macos) ''
-    sed -i 's/-mmacosx-version-min=10\.9/-mmacosx-version-min=11.0/g' cross-file.ini
-    test "$(grep -c -- '-mmacosx-version-min=11.0' cross-file.ini)" = "1"
-  '';
+  deploymentTargetFix =
+    pkgs.lib.optionalString (os == oses.macos) ''
+      sed -i 's/-mmacosx-version-min=10\.9/-mmacosx-version-min=11.0/g' cross-file.ini
+      test "$(grep -c -- '-mmacosx-version-min=11.0' cross-file.ini)" = "1"
+    ''
+    + pkgs.lib.optionalString (os == oses.ios) ''
+      sed -i 's/-miphoneos-version-min=12\.0/-miphoneos-version-min=15.0/g' cross-file.ini
+      test "$(grep -c -- '-miphoneos-version-min=15.0' cross-file.ini)" = "1"
+    '';
   crossFileVulkan = pkgs.runCommand "mk-cross-file-${os}-${arch}-vulkan.ini" { } ''
     # NOTE: '#' is the s/// delimiter on purpose - the pattern uses '|' for
     # alternation, so '|' cannot also be the delimiter.
@@ -64,7 +77,7 @@ let
       exit 1
     fi
 
-    ${macosDeploymentTargetFix}
+    ${deploymentTargetFix}
     cp cross-file.ini $out
   '';
   xctoolchainLipo = callPackage ../../utils/xctoolchain/lipo.nix { };
