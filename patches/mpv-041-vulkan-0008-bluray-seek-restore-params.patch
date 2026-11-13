@@ -12,7 +12,7 @@
 +    // and playback falls back to software, where it cannot recover either.
 +    // mpv 0.36 did exactly this and could seek a Blu-ray without losing
 +    // hardware decoding; 0.41 replaced it with a bare drop_buffers().
-+    demux_seek(p->slave, 0, SEEK_FACTOR | SEEK_FORCE);
++    demux_seek(p->slave, 0, SEEK_FACTOR);
 +    stream_drop_buffers(demuxer->stream);
 +
      double seek_arg[] = {seek_pts, flags};
