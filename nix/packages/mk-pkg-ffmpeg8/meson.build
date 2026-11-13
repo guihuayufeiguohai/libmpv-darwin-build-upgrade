@@ -197,6 +197,16 @@ video_default_options = [
     '--enable-decoder=wmv3', # wmv*
     '--enable-decoder=wmv3image', # wmv*
 
+    # RealVideo. rv10/rv20 select h263_decoder, rv30/rv40 select h264_decoder,
+    # both of which are already above, so these pull in no extra codec cores.
+    # Without them a .rm/.rmvb file opens (the rm demuxer is in the audio
+    # list), plays its audio track, and silently drops video: "no decoders"
+    # in the vd log.
+    '--enable-decoder=rv10',
+    '--enable-decoder=rv20',
+    '--enable-decoder=rv30',
+    '--enable-decoder=rv40',
+
     '--enable-decoder=ssa',
     '--enable-decoder=ass',
     '--enable-decoder=dvbsub',
@@ -218,6 +228,10 @@ video_default_options = [
     # '--enable-parser=mpeg4', # WARNING: Option --enable-parser=mpeg4 did not match anything
     '--enable-parser=mpeg4video',
     '--enable-parser=mpegvideo',
+    # rv30/rv40 have real parsers (rv10/rv20 do not); they let the rm demuxer
+    # report frame timestamps for seeks instead of "parser not found".
+    '--enable-parser=rv30',
+    '--enable-parser=rv40',
 
     # demuxers
     '--enable-demuxer=concat',
