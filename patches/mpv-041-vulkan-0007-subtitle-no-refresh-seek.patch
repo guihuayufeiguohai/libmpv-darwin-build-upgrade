@@ -1,0 +1,18 @@
+--- a/demux/demux.c
++++ b/demux/demux.c
+@@ -4006,7 +4006,14 @@
+     // - If cache is enabled and a seek causes some new data to be cached, the demuxer
+     //   is sought to the end of cache after cache joining. Switching track immediately
+     //   after this also causes the same problem.
+-    if (!in->after_seek || (ds->type != STREAM_VIDEO && !avoid_refresh)) {
++    // Subtitles must never trigger a refresh seek. Their packets are already
++    // in the demuxer cache, and on a Blu-ray a seek discards the H.264
++    // parameter sets (they only exist at the start of the m2ts stream), after
++    // which hardware decoding fails and mpv falls back to software, where it
++    // cannot recover either. The trade-off is that a freshly selected
++    // subtitle track may stay empty until its next packet arrives.
++    if (ds->type != STREAM_SUB &&
++        (!in->after_seek || (ds->type != STREAM_VIDEO && !avoid_refresh))) {
+         MP_VERBOSE(in, "refresh track %d (%s)\n", stream->index,
+                    stream_type_name(ds->type));
+         initiate_refresh_seek(in, ds, ref_pts);
