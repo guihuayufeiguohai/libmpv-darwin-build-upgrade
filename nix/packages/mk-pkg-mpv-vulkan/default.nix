@@ -163,6 +163,15 @@ let
     # died on 'unknown type name CVMetalTextureCacheRef'.
     patch -p1 <${../../../patches/mpv-041-vulkan-0006-darwin-objc-language.patch}
 
+    # Do not refresh-seek when only a subtitle track changes. refresh_track()
+    # exempts video streams but deliberately not subtitles, so selecting a
+    # subtitle on a Blu-ray ISO seeks the disc demuxer, and that seek throws
+    # away the H.264 parameter sets (they exist only at the start of the m2ts).
+    # Hardware decoding then fails with "non-existing PPS 0 referenced" and
+    # mpv falls back to software, where it cannot recover either -- playback
+    # stalls and the audio underruns.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0007-subtitle-no-refresh-seek.patch}
+
     cd -
 
     cp -r $src $out
