@@ -181,6 +181,15 @@ let
     # falls back to software. This is why seeking worked on 0.36 and not 0.41.
     patch -p1 <${../../../patches/mpv-041-vulkan-0008-bluray-seek-restore-params.patch}
 
+    # 0008 could not actually help on a Blu-ray: the slave demuxer sits on a
+    # non-seekable AVIO, so the reset seek fails with "Cannot seek in this
+    # file." and the parameter sets stay lost. Cache the SPS/PPS as they go by
+    # and prepend them to the first packets after a seek or after the decoder
+    # is re-created. That keeps libavcodec's parameter set table populated, so
+    # VideoToolbox no longer answers -12909 and mpv does not abandon hardware
+    # decoding for the rest of the file.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0009-h264-ps-cache.patch}
+
     cd -
 
     cp -r $src $out
