@@ -1,0 +1,20 @@
+--- a/demux/demux_disc.c
++++ b/demux/demux_disc.c
+@@ -177,6 +177,17 @@
+ 
+     MP_VERBOSE(demuxer, "seek to: %f\n", seek_pts);
+ 
++    // Restore the pre-0.41 behaviour: push the slave demuxer back to the start
++    // before jumping, so it re-reads the container headers. On a Blu-ray m2ts
++    // the H.264 SPS/PPS exist only at the very beginning of the stream; without
++    // this the decoder is left with no parameter sets after every seek,
++    // VideoToolbox rejects the next picture with -12909 (kVTVideoDecoderBadDataErr)
++    // and playback falls back to software, where it cannot recover either.
++    // mpv 0.36 did exactly this and could seek a Blu-ray without losing
++    // hardware decoding; 0.41 replaced it with a bare drop_buffers().
++    demux_seek(p->slave, 0, SEEK_FACTOR | SEEK_FORCE);
++    stream_drop_buffers(demuxer->stream);
++
+     double seek_arg[] = {seek_pts, flags};
+     stream_control(demuxer->stream, STREAM_CTRL_SEEK_TO_TIME, seek_arg);
+ 
