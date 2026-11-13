@@ -172,6 +172,15 @@ let
     # stalls and the audio underruns.
     patch -p1 <${../../../patches/mpv-041-vulkan-0007-subtitle-no-refresh-seek.patch}
 
+    # Restore the pre-0.41 disc seek behaviour. 0.36 pushed the slave demuxer
+    # back to the start before jumping ("Supposed to induce a seek reset"),
+    # which made it re-read the container headers; 0.41 replaced that with a
+    # bare drop_buffers(). On a Blu-ray m2ts the H.264 SPS/PPS exist only at
+    # the start of the stream, so without the reset every seek leaves the
+    # decoder without parameter sets, VideoToolbox answers -12909 and playback
+    # falls back to software. This is why seeking worked on 0.36 and not 0.41.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0008-bluray-seek-restore-params.patch}
+
     cd -
 
     cp -r $src $out
