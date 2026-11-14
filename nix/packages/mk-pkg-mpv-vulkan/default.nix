@@ -172,22 +172,25 @@ let
     # stalls and the audio underruns.
     patch -p1 <${../../../patches/mpv-041-vulkan-0007-subtitle-no-refresh-seek.patch}
 
-    # Restore the pre-0.41 disc seek behaviour. 0.36 pushed the slave demuxer
-    # back to the start before jumping ("Supposed to induce a seek reset"),
-    # which made it re-read the container headers; 0.41 replaced that with a
-    # bare drop_buffers(). On a Blu-ray m2ts the H.264 SPS/PPS exist only at
-    # the start of the stream, so without the reset every seek leaves the
-    # decoder without parameter sets, VideoToolbox answers -12909 and playback
-    # falls back to software. This is why seeking worked on 0.36 and not 0.41.
-    patch -p1 <${../../../patches/mpv-041-vulkan-0008-bluray-seek-restore-params.patch}
+    # DO NOT re-add the pre-0.41 disc seek reset.
+    #
+    # The 0.36 build in libmpv-darwin-build-mpv0.36 deliberately deleted
+    # demux_seek(p->slave, 0, ...) + stream_drop_buffers() and replaced them
+    # with the slave's drop_buffers callback, because that low-level seek ends
+    # up in stream_seek(s, 0) and, once forwarded to bd_seek(), drags libbluray
+    # back to byte 0 of the ISO -- the UDF metadata area. Playback then
+    # restarts around 13 s regardless of the requested position and the
+    # sub-demuxer parses UDF sectors as mpegts, producing exactly the
+    # "h264 corruption / VideoToolbox -12909 / Error decoding audio" chain
+    # we have been chasing. mpv 0.41 already ships the drop_buffers callback,
+    # so 0008 only re-introduced the harmful call. See bluray_autodetect_v036.patch
+    # in the 0.36 build for the full write-up.
 
-    # 0008 could not actually help on a Blu-ray: the slave demuxer sits on a
-    # non-seekable AVIO, so the reset seek fails with "Cannot seek in this
-    # file." and the parameter sets stay lost. Cache the SPS/PPS as they go by
-    # and prepend them to the first packets after a seek or after the decoder
-    # is re-created. That keeps libavcodec's parameter set table populated, so
-    # VideoToolbox no longer answers -12909 and mpv does not abandon hardware
-    # decoding for the rest of the file.
+    # Cache the SPS/PPS as they go by and prepend them to the first packets
+    # after a seek or after the decoder is re-created. VideoToolbox builds its
+    # CMVideoFormatDescription from H264Context->ps (see
+    # ff_videotoolbox_avcc_extradata_create), so a valid pair in that table is
+    # what keeps hardware decoding alive; no extradata plumbing is needed.
     patch -p1 <${../../../patches/mpv-041-vulkan-0009-h264-ps-cache.patch}
 
     cd -
