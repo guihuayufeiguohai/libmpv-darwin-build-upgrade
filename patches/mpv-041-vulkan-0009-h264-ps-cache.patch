@@ -8,42 +8,55 @@
  
  #include <libavcodec/avcodec.h>
  #include <libavformat/version.h>
-@@ -238,6 +239,14 @@
+@@ -238,6 +239,15 @@
      bool hwdec_request_reinit;
      int hwdec_fail_count;
  
-+    // Last H.264 SPS/PPS pair seen in the stream (Annex B, start codes
-+    // included), plus how many upcoming packets should carry it.
-+    // Blu-ray m2ts only stores the parameter sets once at the start, so a
++    // Cached H.264 parameter sets (Annex B, start codes included).
++    // Blu-ray m2ts only stores them once at the start of the stream, so a
 +    // seek can leave the decoder without them.
-+    uint8_t *ps_cache;
-+    size_t ps_cache_len;
++    uint8_t *sps;
++    size_t sps_len;
++    uint8_t *pps;
++    size_t pps_len;
 +    int inject_ps;
 +
      struct mp_image_pool *hwdec_swpool;
  
      AVBufferRef *cached_hw_frames_ctx;
-@@ -855,6 +864,10 @@
+@@ -844,6 +854,11 @@
+         goto error;
+     }
+ 
++    // mpegts keeps the parameter sets in-band, but some containers hand them
++    // over as extradata instead. Seed the cache from there as well.
++    if (avctx->extradata && avctx->extradata_size > 0)
++        ps_cache_store(ctx, avctx->extradata, avctx->extradata_size);
++
+ #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+     if (avctx->width > 8192 || avctx->height > 8192) {
+         MP_ERR(vd, "Frame size too big %" PRIu32 "x%" PRIu32 ".\n", avctx->width, avctx->height);
+@@ -855,6 +870,10 @@
      if (avcodec_open2(avctx, lavc_codec, NULL) < 0)
          goto error;
  
 +    // A fresh decoder has no parameter sets; feed it the cached pair with the
 +    // first packets it receives.
-+    ctx->inject_ps = 4;
++    ctx->inject_ps = 8;
 +
      // Sometimes, the first packet contains information required for correct
      // decoding of the rest of the stream. The only currently known case is the
      // x264 build number (encoded in a SEI element), needed to enable a
-@@ -1164,6 +1177,53 @@
+@@ -1164,6 +1183,57 @@
      }
  }
  
-+// Keep the last SPS/PPS we saw, so they can be fed back to the decoder after a
-+// seek. Without this, seeking a Blu-ray leaves the decoder with an empty
-+// parameter set table: libavcodec logs "non-existing PPS 0 referenced",
-+// VideoToolbox answers -12909 (kVTVideoDecoderBadDataErr) for every picture
-+// and mpv falls back to software decoding for the rest of the file.
-+static void update_ps_cache(vd_ffmpeg_ctx *ctx, const uint8_t *data, size_t len)
++// Remember the SPS/PPS carried in this buffer, if any. Blu-ray m2ts stores
++// them once at the start of the stream; after a seek the decoder can end up
++// with an empty parameter set table, libavcodec then logs "non-existing PPS 0
++// referenced", VideoToolbox answers -12909 (kVTVideoDecoderBadDataErr) for
++// every picture and mpv abandons hardware decoding for the rest of the file.
++static void ps_cache_store(vd_ffmpeg_ctx *ctx, const uint8_t *data, size_t len)
 +{
 +    const uint8_t *sps = NULL, *pps = NULL;
 +    size_t sps_len = 0, pps_len = 0;
@@ -65,50 +78,59 @@
 +        while (j + 3 < len && (data[j] || data[j + 1] || data[j + 2] != 1))
 +            j++;
 +        size_t end = (j + 3 < len) ? j : len;
-+        if (type == 7) {
++        if (type == 7 && end > start + 3) {
 +            sps = data + start;
 +            sps_len = end - start;
-+        } else if (type == 8) {
++        } else if (type == 8 && end > start + 3) {
 +            pps = data + start;
 +            pps_len = end - start;
 +        }
 +        i = end;
 +    }
 +
-+    if (!sps || !pps || sps_len + pps_len > 4096)
-+        return;
-+
-+    talloc_free(ctx->ps_cache);
-+    ctx->ps_cache_len = sps_len + pps_len;
-+    ctx->ps_cache = talloc_size(ctx, ctx->ps_cache_len);
-+    memcpy(ctx->ps_cache, sps, sps_len);
-+    memcpy(ctx->ps_cache + sps_len, pps, pps_len);
++    if (sps && sps_len < 2048) {
++        talloc_free(ctx->sps);
++        ctx->sps = talloc_memdup(ctx, sps, sps_len);
++        ctx->sps_len = sps_len;
++        MP_VERBOSE(ctx->log, "psfix: cached SPS %zu bytes\n", sps_len);
++    }
++    if (pps && pps_len < 2048) {
++        talloc_free(ctx->pps);
++        ctx->pps = talloc_memdup(ctx, pps, pps_len);
++        ctx->pps_len = pps_len;
++        MP_VERBOSE(ctx->log, "psfix: cached PPS %zu bytes\n", pps_len);
++    }
 +}
 +
  static int send_packet(struct mp_filter *vd, struct demux_packet *pkt)
  {
      vd_ffmpeg_ctx *ctx = vd->priv;
-@@ -1185,7 +1245,29 @@
+@@ -1185,7 +1255,34 @@
  
      mp_set_av_packet(ctx->avpkt, pkt, &ctx->codec_timebase);
  
 -    int ret = avcodec_send_packet(avctx, pkt ? ctx->avpkt : NULL);
 +    if (ctx->avpkt && pkt)
-+        update_ps_cache(ctx, ctx->avpkt->data, ctx->avpkt->size);
++        ps_cache_store(ctx, ctx->avpkt->data, ctx->avpkt->size);
 +
 +    AVPacket *inject = NULL;
-+    if (ctx->inject_ps > 0 && ctx->ps_cache_len && pkt) {
++    if (ctx->inject_ps > 0 && ctx->sps_len && ctx->pps_len && pkt) {
++        int extra = (int)(ctx->sps_len + ctx->pps_len);
 +        inject = av_packet_alloc();
-+        if (inject &&
-+            av_new_packet(inject, ctx->ps_cache_len + ctx->avpkt->size) >= 0)
-+        {
-+            memcpy(inject->data, ctx->ps_cache, ctx->ps_cache_len);
-+            memcpy(inject->data + ctx->ps_cache_len, ctx->avpkt->data,
-+                   ctx->avpkt->size);
++        if (inject && av_new_packet(inject, extra + ctx->avpkt->size) >= 0) {
++            memcpy(inject->data, ctx->sps, ctx->sps_len);
++            memcpy(inject->data + ctx->sps_len, ctx->pps, ctx->pps_len);
++            memcpy(inject->data + extra, ctx->avpkt->data, ctx->avpkt->size);
 +            av_packet_copy_props(inject, ctx->avpkt);
++            MP_VERBOSE(vd, "psfix: injected %d bytes of SPS/PPS into a %d byte "
++                       "packet (%d left)\n", extra, ctx->avpkt->size,
++                       ctx->inject_ps);
 +        } else {
 +            av_packet_free(&inject);
 +        }
++    } else if (ctx->inject_ps > 0 && pkt && !ctx->sps_len) {
++        MP_VERBOSE(vd, "psfix: wanted to inject but the cache is empty\n");
++        ctx->inject_ps = 0;
 +    }
 +
 +    int ret = avcodec_send_packet(avctx,
@@ -119,13 +141,15 @@
      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
          return ret;
  
-@@ -1410,6 +1492,9 @@
+@@ -1410,6 +1507,11 @@
  
      ctx->state = (struct lavc_state){0};
      ctx->framedrop_flags = 0;
 +
 +    // A seek can drop the parameter sets; re-feed them with the next packets.
-+    ctx->inject_ps = 4;
++    ctx->inject_ps = 8;
++    MP_VERBOSE(vd, "psfix: reset, sps=%zu pps=%zu, will inject\n",
++               ctx->sps_len, ctx->pps_len);
  }
  
  static void vd_lavc_destroy(struct mp_filter *vd)
