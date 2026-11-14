@@ -24,19 +24,29 @@
      struct mp_image_pool *hwdec_swpool;
  
      AVBufferRef *cached_hw_frames_ctx;
-@@ -844,6 +854,11 @@
+@@ -701,6 +711,9 @@
+     }
+ }
+ 
++static void ps_cache_store(struct mp_filter *vd, vd_ffmpeg_ctx *ctx,
++                           const uint8_t *data, size_t len);
++
+ static void init_avctx(struct mp_filter *vd)
+ {
+     vd_ffmpeg_ctx *ctx = vd->priv;
+@@ -844,6 +857,11 @@
          goto error;
      }
  
 +    // mpegts keeps the parameter sets in-band, but some containers hand them
 +    // over as extradata instead. Seed the cache from there as well.
 +    if (avctx->extradata && avctx->extradata_size > 0)
-+        ps_cache_store(ctx, avctx->extradata, avctx->extradata_size);
++        ps_cache_store(vd, ctx, avctx->extradata, avctx->extradata_size);
 +
  #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
      if (avctx->width > 8192 || avctx->height > 8192) {
          MP_ERR(vd, "Frame size too big %" PRIu32 "x%" PRIu32 ".\n", avctx->width, avctx->height);
-@@ -855,6 +870,10 @@
+@@ -855,6 +873,10 @@
      if (avcodec_open2(avctx, lavc_codec, NULL) < 0)
          goto error;
  
@@ -47,7 +57,7 @@
      // Sometimes, the first packet contains information required for correct
      // decoding of the rest of the stream. The only currently known case is the
      // x264 build number (encoded in a SEI element), needed to enable a
-@@ -1164,6 +1183,57 @@
+@@ -1164,6 +1186,58 @@
      }
  }
  
@@ -56,7 +66,8 @@
 +// with an empty parameter set table, libavcodec then logs "non-existing PPS 0
 +// referenced", VideoToolbox answers -12909 (kVTVideoDecoderBadDataErr) for
 +// every picture and mpv abandons hardware decoding for the rest of the file.
-+static void ps_cache_store(vd_ffmpeg_ctx *ctx, const uint8_t *data, size_t len)
++static void ps_cache_store(struct mp_filter *vd, vd_ffmpeg_ctx *ctx,
++                           const uint8_t *data, size_t len)
 +{
 +    const uint8_t *sps = NULL, *pps = NULL;
 +    size_t sps_len = 0, pps_len = 0;
@@ -92,26 +103,26 @@
 +        talloc_free(ctx->sps);
 +        ctx->sps = talloc_memdup(ctx, sps, sps_len);
 +        ctx->sps_len = sps_len;
-+        MP_VERBOSE(ctx->log, "psfix: cached SPS %zu bytes\n", sps_len);
++        MP_VERBOSE(vd, "psfix: cached SPS %zu bytes\n", sps_len);
 +    }
 +    if (pps && pps_len < 2048) {
 +        talloc_free(ctx->pps);
 +        ctx->pps = talloc_memdup(ctx, pps, pps_len);
 +        ctx->pps_len = pps_len;
-+        MP_VERBOSE(ctx->log, "psfix: cached PPS %zu bytes\n", pps_len);
++        MP_VERBOSE(vd, "psfix: cached PPS %zu bytes\n", pps_len);
 +    }
 +}
 +
  static int send_packet(struct mp_filter *vd, struct demux_packet *pkt)
  {
      vd_ffmpeg_ctx *ctx = vd->priv;
-@@ -1185,7 +1255,34 @@
+@@ -1185,7 +1259,34 @@
  
      mp_set_av_packet(ctx->avpkt, pkt, &ctx->codec_timebase);
  
 -    int ret = avcodec_send_packet(avctx, pkt ? ctx->avpkt : NULL);
 +    if (ctx->avpkt && pkt)
-+        ps_cache_store(ctx, ctx->avpkt->data, ctx->avpkt->size);
++        ps_cache_store(vd, ctx, ctx->avpkt->data, ctx->avpkt->size);
 +
 +    AVPacket *inject = NULL;
 +    if (ctx->inject_ps > 0 && ctx->sps_len && ctx->pps_len && pkt) {
@@ -141,7 +152,7 @@
      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
          return ret;
  
-@@ -1410,6 +1507,11 @@
+@@ -1410,6 +1511,11 @@
  
      ctx->state = (struct lavc_state){0};
      ctx->framedrop_flags = 0;
