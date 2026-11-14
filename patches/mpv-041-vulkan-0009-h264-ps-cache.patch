@@ -8,7 +8,7 @@
  
  #include <libavcodec/avcodec.h>
  #include <libavformat/version.h>
-@@ -238,6 +239,15 @@
+@@ -238,6 +239,16 @@
      bool hwdec_request_reinit;
      int hwdec_fail_count;
  
@@ -20,11 +20,12 @@
 +    uint8_t *pps;
 +    size_t pps_len;
 +    int inject_ps;
++    bool ps_logged;
 +
      struct mp_image_pool *hwdec_swpool;
  
      AVBufferRef *cached_hw_frames_ctx;
-@@ -701,6 +711,9 @@
+@@ -701,6 +712,9 @@
      }
  }
  
@@ -34,7 +35,7 @@
  static void init_avctx(struct mp_filter *vd)
  {
      vd_ffmpeg_ctx *ctx = vd->priv;
-@@ -844,6 +857,11 @@
+@@ -844,6 +858,11 @@
          goto error;
      }
  
@@ -46,7 +47,7 @@
  #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
      if (avctx->width > 8192 || avctx->height > 8192) {
          MP_ERR(vd, "Frame size too big %" PRIu32 "x%" PRIu32 ".\n", avctx->width, avctx->height);
-@@ -855,6 +873,10 @@
+@@ -855,6 +874,10 @@
      if (avcodec_open2(avctx, lavc_codec, NULL) < 0)
          goto error;
  
@@ -57,7 +58,7 @@
      // Sometimes, the first packet contains information required for correct
      // decoding of the rest of the stream. The only currently known case is the
      // x264 build number (encoded in a SEI element), needed to enable a
-@@ -1164,6 +1186,58 @@
+@@ -1164,6 +1187,76 @@
      }
  }
  
@@ -74,6 +75,15 @@
 +
 +    if (!data || len < 4)
 +        return;
++
++    if (!ctx->ps_logged) {
++        char hex[3 * 32 + 1] = {0};
++        size_t n = MPMIN(len, (size_t)32);
++        for (size_t k = 0; k < n; k++)
++            sprintf(hex + k * 3, "%02x ", data[k]);
++        MP_VERBOSE(vd, "psfix: head len=%zu: %s\n", len, hex);
++        ctx->ps_logged = true;
++    }
 +
 +    for (size_t i = 0; i + 3 < len; ) {
 +        if (data[i] || data[i + 1] || data[i + 2] != 1) {
@@ -99,6 +109,15 @@
 +        i = end;
 +    }
 +
++    if (sps && (sps_len < 4 || sps_len > 64)) {
++        MP_VERBOSE(vd, "psfix: reject SPS, %zu bytes\n", sps_len);
++        sps = NULL;
++    }
++    if (pps && (pps_len < 2 || pps_len > 32)) {
++        MP_VERBOSE(vd, "psfix: reject PPS, %zu bytes\n", pps_len);
++        pps = NULL;
++    }
++
 +    if (sps && sps_len < 2048) {
 +        talloc_free(ctx->sps);
 +        ctx->sps = talloc_memdup(ctx, sps, sps_len);
@@ -116,7 +135,7 @@
  static int send_packet(struct mp_filter *vd, struct demux_packet *pkt)
  {
      vd_ffmpeg_ctx *ctx = vd->priv;
-@@ -1185,7 +1259,34 @@
+@@ -1185,7 +1278,34 @@
  
      mp_set_av_packet(ctx->avpkt, pkt, &ctx->codec_timebase);
  
@@ -152,7 +171,7 @@
      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
          return ret;
  
-@@ -1410,6 +1511,11 @@
+@@ -1410,6 +1530,11 @@
  
      ctx->state = (struct lavc_state){0};
      ctx->framedrop_flags = 0;
