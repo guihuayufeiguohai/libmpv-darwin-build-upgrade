@@ -100,12 +100,19 @@ audio_default_options = [
     '--enable-decoder=pcm*',
     '--enable-decoder=dsd*',
     '--enable-decoder=dca', # required by dts
+    # TrueHD / MLP live in libavcodec/mlpdec.c but are separate configure
+    # targets. Without them a TrueHD track reports "(no decoders)" and mpv
+    # disables audio for the whole file instead of falling back to another
+    # track -- so a remux with a good AC3 second track plays silent.
+    '--enable-decoder=mlp',
+    '--enable-decoder=truehd',
 
     # parsers   
     '--enable-parser=aac*',
     '--enable-parser=ac3',
     '--enable-parser=cook',
     '--enable-parser=dca',
+    '--enable-parser=mlp', # raw .mlp / .thd streams
     '--enable-parser=flac',
     '--enable-parser=gsm',
     '--enable-parser=mpegaudio',
@@ -139,6 +146,7 @@ audio_default_options = [
     '--enable-demuxer=dsf',
     '--enable-demuxer=dts',
     '--enable-demuxer=truehd',
+    '--enable-demuxer=mlp',
 
     # protocols
     '--enable-protocol=async',
