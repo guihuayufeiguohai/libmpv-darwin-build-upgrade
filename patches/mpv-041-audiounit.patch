@@ -36,10 +36,6 @@ index 8d4eb4d..5da889e 100644
 +#include <libavutil/opt.h>
 +
 +static SwrContext *tap_swr_ctx = NULL;
-+// Scratch for one converted block: 16 kHz mono from <=4096 input frames.
-+#define TAP_OUT_SAMPLES 4096
-+static int16_t tap_outbuf[TAP_OUT_SAMPLES];
-+static int tap_swr_fmt = 0;
 +
 +// Output is fixed to 16 kHz / s16 / mono; input format is dynamic.
 +__attribute__((visibility("default")))
@@ -47,12 +43,9 @@ index 8d4eb4d..5da889e 100644
 +{
 +    enum AVSampleFormat in_fmt;
 +    switch (in_format) {
-+        case AF_FORMAT_FLOAT:   in_fmt = AV_SAMPLE_FMT_FLT;  break;
-+        case AF_FORMAT_FLOATP:  in_fmt = AV_SAMPLE_FMT_FLTP; break;
-+        case AF_FORMAT_S16:     in_fmt = AV_SAMPLE_FMT_S16;  break;
-+        case AF_FORMAT_S16P:    in_fmt = AV_SAMPLE_FMT_S16P; break;
-+        case AF_FORMAT_S32:     in_fmt = AV_SAMPLE_FMT_S32;  break;
-+        case AF_FORMAT_S32P:    in_fmt = AV_SAMPLE_FMT_S32P; break;
++        case AF_FORMAT_FLOAT:   in_fmt = AV_SAMPLE_FMT_FLT; break;
++        case AF_FORMAT_S16:     in_fmt = AV_SAMPLE_FMT_S16; break;
++        case AF_FORMAT_S32:     in_fmt = AV_SAMPLE_FMT_S32; break;
 +        default: return -1;
 +    }
 +
@@ -172,46 +165,12 @@ index 8d4eb4d..5da889e 100644
      end += ca_get_latency(ts) + ca_frames_to_ns(ao, frames);
      ao_read_data(ao, planes, frames, end, NULL, true, true);
 +
-+    // ==== Audio tap: deliver 16 kHz / mono / s16, ready for ASR ====
-+    // mpv hands the AudioUnit one buffer per plane (s16p for stereo), so
-+    // forwarding them one by one produced LLLL...RRRR..., which every decoder
-+    // reads as interleaved and plays back slow and noisy. Convert here, where
-+    // planes[] and the sample format are both in scope, and hand the embedder
-+    // a single interleaved mono block instead.
++    // ==== Audio tap: hand the freshly filled PCM to the embedder ====
 +    if (audio_tap_cb) {
-+        // AudioUnit does not honour the format set on
-+        // kAudioUnitProperty_StreamFormat: on iOS it hands back 32-bit
-+        // samples even though ao->format says s16p. Trusting ao->format here
-+        // made the tap emit samples that played at half speed and sounded
-+        // like noise. Derive the real width from the buffer and re-init swr
-+        // whenever it changes.
-+        int bps = 2;
-+        if (frames > 0 && buffer_list->mNumberBuffers > 0) {
-+            int denom = ao->num_planes > 1 ? 1 : ao->channels.num;
-+            int got_bps = (int)(buffer_list->mBuffers[0].mDataByteSize /
-+                                ((UInt32)frames * (UInt32)denom));
-+            if (got_bps == 2 || got_bps == 4)
-+                bps = got_bps;
-+        }
-+        int fmt;
-+        if (bps == 4)
-+            fmt = ao->num_planes > 1 ? AF_FORMAT_S32P : AF_FORMAT_S32;
-+        else
-+            fmt = ao->num_planes > 1 ? AF_FORMAT_S16P : AF_FORMAT_S16;
-+
-+        if (fmt != tap_swr_fmt) {
-+            mpv_ao_audiounit_init_swr(ao->samplerate, ao->channels.num, fmt);
-+            tap_swr_fmt = tap_swr_ctx ? fmt : 0;
-+        }
-+        if (tap_swr_ctx) {
-+            const uint8_t *in[MP_NUM_CHANNELS] = {0};
-+            for (int n = 0; n < ao->num_planes; n++)
-+                in[n] = planes[n];
-+            uint8_t *out[1] = { (uint8_t *)tap_outbuf };
-+            int got = swr_convert(tap_swr_ctx, out, TAP_OUT_SAMPLES, in, frames);
-+            if (got > 0)
-+                audio_tap_cb(tap_outbuf, (size_t)got * sizeof(int16_t),
-+                             audio_tap_ctx);
++        for (UInt32 i = 0; i < buffer_list->mNumberBuffers; i++) {
++            AudioBuffer buf = buffer_list->mBuffers[i];
++            if (buf.mDataByteSize > 0)
++                audio_tap_cb(buf.mData, buf.mDataByteSize, audio_tap_ctx);
 +        }
 +    }
 +    // ==== Audio tap end ====
