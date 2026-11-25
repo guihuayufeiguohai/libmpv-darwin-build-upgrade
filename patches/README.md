@@ -48,6 +48,13 @@ patch used on `main`) **conflicts** with 0004 — both rewrite
 `vo_gpu_next.c` and `vo_libmpv.c`. On the Vulkan branch, apply the four
 Vulkan patches instead and leave the route A patch out.
 
+`mpv-041-vulkan-0010-pgs-colorspace.patch` fixes PGS/VobSub dead-white on
+HDR: gpu-next's `SUBBITMAP_BGRA` path inherited the video color space
+(`ol->color = src->params.color`), so on PQ/DV the sRGB subtitle white was
+read as PQ white. It adds `--image-subs-colorspace=video|sdr|auto` (default
+`video`); the App sets `auto` so HDR keeps the bitmap in sRGB with an
+independent white level via `--image-subs-hdr-peak`. Ref: mpv #18286.
+
 ## Verification method
 
 Every "applies" claim above was produced by running

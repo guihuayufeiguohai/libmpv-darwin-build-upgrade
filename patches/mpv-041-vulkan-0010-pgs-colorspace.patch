@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wx_catvod_app <dev@local>
+Date: Wed, 25 Nov 2026 20:00:00 +0800
+Subject: [PATCH] vo_gpu_next: add image subtitle colorspace control
+
+PGS/VobSub/DVB bitmaps are authored as SDR graphics. In gpu-next the
+SUBBITMAP_BGRA path inherits the video color space (ol->color =
+src->params.color), so on HDR/PQ/Dolby Vision video the sRGB subtitle
+white is interpreted as PQ white -> dead white (super bright).
+--image-subs-hdr-peak only adjusts the peak, not the transfer function,
+so it cannot fix this brightness problem.
+
+Add --image-subs-colorspace=video|sdr|auto (default video, preserving
+the historical behavior). When set to sdr, or to auto with HDR video,
+keep the bitmap in sRGB and set an independent diffuse white level via
+--image-subs-hdr-peak.
+
+Ref: upstream mpv issue #18286.
+---
+ video/out/vo_gpu_next.c | 52 ++++++++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 44 insertions(+), 8 deletions(-)
+
+--- a/video/out/vo_gpu_next.c	2026-11-25 20:25:14.891312600 +0800
++++ b/video/out/vo_gpu_next.c	2026-11-25 20:25:14.893313700 +0800
+@@ -171,10 +171,17 @@
+ static void update_render_options(struct vo *vo);
+ static void update_lut(struct priv *p, struct user_lut *lut);
+ 
++enum image_subs_colorspace_mode {
++    IMAGE_SUBS_COLORSPACE_VIDEO,
++    IMAGE_SUBS_COLORSPACE_SDR,
++    IMAGE_SUBS_COLORSPACE_AUTO,
++};
++
+ struct gl_next_opts {
+     bool delayed_peak;
+     int sub_hdr_peak;
+     int image_subs_hdr_peak;
++    int image_subs_colorspace;
+     int border_background;
+     float background_blur_radius;
+     float corner_rounding;
+@@ -203,6 +210,10 @@
+             M_RANGE(10, 10000)},
+         {"image-subs-hdr-peak", OPT_CHOICE(image_subs_hdr_peak, {"sdr", PL_COLOR_SDR_WHITE},
+             {"video", -1}),  M_RANGE(10, 10000)},
++        {"image-subs-colorspace", OPT_CHOICE(image_subs_colorspace,
++            {"video", IMAGE_SUBS_COLORSPACE_VIDEO},
++            {"sdr", IMAGE_SUBS_COLORSPACE_SDR},
++            {"auto", IMAGE_SUBS_COLORSPACE_AUTO})},
+         {"allow-delayed-peak-detect", OPT_BOOL(delayed_peak)},
+         {"border-background", OPT_CHOICE(border_background,
+             {"none",  BACKGROUND_NONE},
+@@ -234,6 +245,7 @@
+         .inter_preserve = true,
+         .sub_hdr_peak = PL_COLOR_SDR_WHITE,
+         .image_subs_hdr_peak = PL_COLOR_SDR_WHITE,
++        .image_subs_colorspace = IMAGE_SUBS_COLORSPACE_VIDEO,
+         .target_hint = -1,
+         .target_hint_strict = true,
+     },
+@@ -397,8 +409,15 @@
+         case SUBBITMAP_BGRA:
+             ol->mode = PL_OVERLAY_NORMAL;
+             ol->repr.alpha = PL_ALPHA_PREMULTIPLIED;
+-            // Infer bitmap colorspace from source
+-            if (src) {
++
++            bool use_video_colorspace = src &&
++                (p->next_opts->image_subs_colorspace == IMAGE_SUBS_COLORSPACE_VIDEO ||
++                 (p->next_opts->image_subs_colorspace == IMAGE_SUBS_COLORSPACE_AUTO &&
++                  !pl_color_transfer_is_hdr(src->params.color.transfer)));
++
++            if (use_video_colorspace) {
++                // Preserve the historical behavior: inherit the video color
++                // space (this is what makes PGS white go dead-white on HDR).
+                 ol->color = src->params.color;
+                 if (pl_color_transfer_is_hdr(ol->color.transfer)) {
+                     if (!pl_color_transfer_is_hdr(frame->color.transfer)) {
+@@ -412,6 +431,15 @@
+                         };
+                     }
+                 }
++            } else {
++                // Image subtitles are authored as SDR graphics. PGS bitmaps
++                // must not inherit PQ/HLG/DV transfer metadata from the video
++                // they are overlaid on: keep sRGB and set an independent
++                // diffuse white level via image-subs-hdr-peak.
++                int peak = p->next_opts->image_subs_hdr_peak;
++                ol->color = pl_color_space_srgb;
++                ol->color.hdr.max_luma = peak >= 10
++                    ? peak : PL_COLOR_SDR_WHITE;
+             }
+             break;
+         case SUBBITMAP_LIBASS:

@@ -193,6 +193,16 @@ let
     # what keeps hardware decoding alive; no extradata plumbing is needed.
     patch -p1 <${../../../patches/mpv-041-vulkan-0009-h264-ps-cache.patch}
 
+    # PGS/VobSub bitmaps are SDR graphics, but gpu-next's SUBBITMAP_BGRA path
+    # inherits the video color space (ol->color = src->params.color). On
+    # HDR/PQ/DV video the sRGB subtitle white is therefore interpreted as PQ
+    # white -> dead white (super bright). --image-subs-hdr-peak only adjusts
+    # the peak, not the transfer function, so it cannot fix this. Add
+    # --image-subs-colorspace=video|sdr|auto (default video). App sets it to
+    # "auto" so HDR keeps the bitmap in sRGB with an independent white level.
+    # Ref: upstream mpv issue #18286.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0010-pgs-colorspace.patch}
+
     cd -
 
     cp -r $src $out
