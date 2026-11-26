@@ -1,0 +1,33 @@
+Subject: [PATCH] demux_mkv: widen subtitle preroll to 10s and enable on every seek
+
+PGS/VobSub bitmap subtitles only carry the "show" command at the start of a
+line. The default subtitle preroll window is 1 second, and in "index" mode it
+is only used when the file carries a duration index. Seeking into the middle
+of a longer line therefore skips that line's bitmap packet entirely, and
+nothing is displayed until the next line's packet arrives.
+
+Enable the preroll unconditionally and widen the window to 10 seconds, which
+is already the default for the duration-index path
+(subtitle_preroll_secs_index). This only costs extra demuxing at seek time:
+audio and video packets in the preroll window are dropped in the demuxer and
+never reach the decoders.
+
+---
+--- a/demux/demux_mkv.c
++++ b/demux/demux_mkv.c
+@@ -258,8 +258,13 @@
+     },
+     .size = sizeof(struct demux_mkv_opts),
+     .defaults = &(const struct demux_mkv_opts){
+-        .subtitle_preroll = 2,
+-        .subtitle_preroll_secs = 1.0,
++        // Preroll on every seek (not only when the file carries a duration
++        // index) and widen the window from 1s to 10s. PGS/VobSub bitmaps carry
++        // the "show" command only at the start of a line, so a 1s window misses
++        // the current line whenever the seek lands in the middle of it: nothing
++        // is shown until the next line's packet arrives.
++        .subtitle_preroll = 1,
++        .subtitle_preroll_secs = 10.0,
+         .subtitle_preroll_secs_index = 10.0,
+         .probe_start_time = true,
+         .crop_compat = true,

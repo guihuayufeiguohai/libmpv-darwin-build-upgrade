@@ -203,6 +203,16 @@ let
     # Ref: upstream mpv issue #18286.
     patch -p1 <${../../../patches/mpv-041-vulkan-0010-pgs-colorspace.patch}
 
+    # Subtitles: PGS/VobSub bitmaps only carry the "show" command at the start
+    # of a line. The default preroll window is 1s (and in "index" mode it is
+    # only used when the file carries a duration index), so seeking into the
+    # middle of a line skips that line's packet and nothing shows until the
+    # next line arrives. Enable preroll on every seek and widen it to 10s,
+    # which is the value mpv already uses for the duration-index path.
+    # 0007 is also relaxed to the disc demuxer only, so regular files keep the
+    # subtitle refresh seek.
+    patch -p1 <${../../../patches/mpv-041-vulkan-0011-mkv-subtitle-preroll.patch}
+
     cd -
 
     cp -r $src $out

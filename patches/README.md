@@ -55,6 +55,22 @@ read as PQ white. It adds `--image-subs-colorspace=video|sdr|auto` (default
 `video`); the App sets `auto` so HDR keeps the bitmap in sRGB with an
 independent white level via `--image-subs-hdr-peak`. Ref: mpv #18286.
 
+`mpv-041-vulkan-0011-mkv-subtitle-preroll.patch` fixes the "PGS subtitle
+missing after seeking into the middle of a line" problem. Bitmap subtitles
+only carry the *show* command at the start of a line, and demux_mkv's preroll
+window defaults to 1s (in `index` mode it is only used when the file carries
+a duration index), so the current line's packet is skipped on seek and
+nothing appears until the next line. The patch enables the preroll on every
+seek and widens it to 10s — the value mpv already uses for the duration-index
+path. Cost is demux-only: audio/video packets inside the preroll window are
+dropped in the demuxer and never reach the decoders.
+
+`mpv-041-vulkan-0007-subtitle-no-refresh-seek.patch` is scoped down by the
+same change set: subtitle refresh seeks are now suppressed **only** on the
+`disc` demuxer (a Blu-ray seek discards the H.264 parameter sets, which only
+exist at the start of the m2ts stream). Regular mkv/mp4 files keep mpv's
+native behaviour.
+
 ## Verification method
 
 Every "applies" claim above was produced by running
